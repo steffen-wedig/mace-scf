@@ -82,10 +82,16 @@ def compute_forces_virials_cellstress(
     )
     stress = torch.zeros_like(displacement)
     if cell_virials is not None:
-        cell_virials = 0.5 * (cell_virials + cell_virials.transpose(-1, -2))
+        # STRESS FIX: convert the cell-gradient dE/dcell into a virial with the
+        # correct chain rule for a `cell -> cell @ (I+eps)` strain:
+        #   dE/deps = cell^T @ (dE/dcell)
+        # The previous element-wise `cell_virials *= cell` (Hadamard) is wrong:
+        # for a diagonal cell it happens to match on the diagonal but ZEROES the
+        # off-diagonal, giving correct normal stress but wrong SHEAR stress.
         cell = cell.view(-1, 3, 3)
-        cell_virials *= cell
-        virials += cell_virials
+        cell_virials = torch.matmul(cell.transpose(-1, -2), cell_virials)
+        cell_virials = 0.5 * (cell_virials + cell_virials.transpose(-1, -2))
+        virials = virials + cell_virials
 
     if compute_stress and virials is not None:
         cell = cell.view(-1, 3, 3)
