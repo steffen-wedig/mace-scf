@@ -19,7 +19,7 @@ We are still adding some key features to the repo. Non-SCF models like the local
 Please install your own version of pytorch. Note that newer version of pytorch (>=2.5) are needed for torch compilation. However, the implicit differentation code provided by `torchopt` seems to be stable with older pytorch versions. See the documentation on implicit differentiation for more information.
 
 Packages related to mace:
-- MACE_SCF is tied to `mace==v0.3.14` for now. please checkout this mace version. 
+- MACE_SCF requires `mace-torch>=0.3.14` (validated on 0.3.14 and 0.3.16, the current newest). This repo relies on mace-torch internals that are not a stable public API, so a newer release may need code changes.
 - we use [graph_longrange](https://github.com/WillBaldwin0/graph_electrostatics) for electrostatic calculations of things like electrostatic energy, electric potential and to provide embeddings like compensating jellium slabs.
 
 ## Model Families
