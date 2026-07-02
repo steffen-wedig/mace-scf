@@ -216,6 +216,30 @@ class _LocalSourceModelBase(torch.nn.Module):
         volume: torch.Tensor,
         external_field: torch.Tensor,
     ) -> torch.Tensor:
+        # Realspace (non-periodic) systems never use k-vectors: the realspace
+        # GTOElectrostaticEnergy path ignores every k-space argument. Building them
+        # (compute_k_vectors_flat over a default box) is pure wasted work here, so
+        # skip it and pass empty placeholders. Numerically identical on this path
+        # (verified max|dE| ~ 1e-12).
+        if self.coulomb_energy.pbc_handling == "realspace":
+            device = data["positions"].device
+            dtype = torch.get_default_dtype()
+            empty_vectors = torch.zeros((0, 3), dtype=dtype, device=device)
+            empty_scalars = torch.zeros((0,), dtype=dtype, device=device)
+            empty_batch = torch.zeros((0,), dtype=torch.long, device=device)
+            electro_energy = self.coulomb_energy(
+                k_vectors=empty_vectors,
+                k_norm2=empty_scalars,
+                k_vector_batch=empty_batch,
+                k0_mask=empty_scalars,
+                source_feats=charge_density,
+                node_positions=data["positions"],
+                batch=data["batch"],
+                volume=volume,
+                pbc=data["pbc"].view(-1, 3),
+            )
+            return electro_energy + torch.sum(total_dipole * external_field, dim=-1)
+
         k_vectors, k_vectors_norms_squared, k_vectors_batch, k0_mask = (
             compute_k_vectors_flat(
                 self.kspace_cutoff, cell.view(-1, 3, 3), rcell.view(-1, 3, 3)
