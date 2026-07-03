@@ -308,6 +308,11 @@ class ExtAtomicData(AtomicData):
             rcell=rcell,
             pbc=pbc,
             total_charge=total_charge,
+            # mace-torch >=0.3.16 (PolarMACE) reads data["total_spin"] in forward.
+            # base AtomicData.from_config already computed it (default 1.0 = singlet
+            # multiplicity); this reconstruction previously dropped it. Pass it through
+            # (base AtomicData.__init__ handles it, like polarizability above).
+            total_spin=atomic_data.total_spin,
             external_field=external_field,
             fermi_level=fermi_level,
             fermi_level_weight=fermi_level_weight,
