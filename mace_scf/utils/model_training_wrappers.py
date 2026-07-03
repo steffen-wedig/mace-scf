@@ -34,7 +34,10 @@ def make_model_wrapper(
 ):
     model_class = model.__class__.__name__
 
-    if model_class in ["MACE", "ScaleShiftMACE"]:
+    if model_class in ["MACE", "ScaleShiftMACE", "PolarMACE"]:
+        # PolarMACE is a ScaleShiftMACE subclass with a single energy/forces forward,
+        # so it uses the standard wrapper (its long-range electrostatics run inside
+        # that one forward pass -- no SCF loop like FixedPoint).
         return DefaultModelWrapper(
             optimizer=optimizer,
             output_args=output_args,

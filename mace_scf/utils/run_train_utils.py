@@ -216,6 +216,44 @@ def build_model(
                 read_hardness=args.read_hardness,
                 default_hardness=args.default_hardness,
             )
+    elif args.model == "PolarMACE":
+        # mace-torch >=0.3.16 polarizable long-range model. It subclasses
+        # ScaleShiftMACE (single forward pass -> energy/forces), so it trains through
+        # the same loop as MACE / LocalSplitCharges. Two integration notes:
+        #  * Its field blocks come from *base mace's* registries
+        #    (mace.modules.field_blocks), NOT mace_scf's. So we pass
+        #    fixedpoint_update_config / field_readout_config / field_feature_norms as
+        #    None and let PolarMACE use its own base-mace defaults -- do NOT feed it
+        #    the mace_scf-resolved field-block configs (they reference different classes).
+        #  * Field-arg name mapping: mace_scf's --include_field_si /
+        #    --include_local_electron_energy map to PolarMACE's field_si /
+        #    add_local_electron_energy; num_recursion_steps comes from the base parser.
+        mean, std = mace.modules.scaling_classes[args.scaling](
+            train_loader, atomic_energies
+        )
+        model = mace.modules.PolarMACE(
+            **model_config,
+            interaction_cls_first=mace.modules.interaction_classes[
+                args.interaction_first
+            ],
+            atomic_inter_scale=std,
+            atomic_inter_shift=mean,
+            kspace_cutoff_factor=args.kspace_cutoff_factor,
+            atomic_multipoles_max_l=args.atomic_multipoles_max_l,
+            atomic_multipoles_smearing_width=args.atomic_multipoles_smearing_width,
+            field_feature_max_l=args.field_feature_max_l,
+            field_feature_widths=ast.literal_eval(args.field_feature_widths),
+            num_recursion_steps=args.num_recursion_steps,
+            field_si=args.include_field_si,
+            include_electrostatic_self_interaction=args.include_electrostatic_self_interaction,
+            add_local_electron_energy=args.include_local_electron_energy,
+            quadrupole_feature_corrections=args.quadrupole_feature_corrections,
+            return_electrostatic_potentials=args.return_electrostatic_potentials,
+            field_norm_factor=args.field_norm_factor,
+            field_feature_norms=None,
+            fixedpoint_update_config=None,
+            field_readout_config=None,
+        )
     else:
         raise RuntimeError(f"Unknown model: '{args.model}'")
 

@@ -35,6 +35,31 @@ def preprocess_extended_arg_parser() -> argparse.ArgumentParser:
 def extended_arg_parser() -> argparse.ArgumentParser:
     parser = build_default_arg_parser()
 
+    # mace-torch >= 0.3.16 merged the long-range / field-model arguments into the
+    # base parser (this fork was branched against 0.3.14, before that merge). Drop
+    # the base copies of every field / multipole argument this function re-defines
+    # below, so mace_scf's own definitions win instead of raising a duplicate-option
+    # ArgumentError at add_argument time. (--model / --heads / --error_table /
+    # --optimizer / --compute_polarizability / --restart_latest are removed + re-added
+    # by the existing remove_options() call further down.)
+    remove_options(
+        parser,
+        [
+            "--atomic_multipoles_max_l",
+            "--atomic_multipoles_smearing_width",
+            "--kspace_cutoff_factor",
+            "--field_feature_max_l",
+            "--field_feature_widths",
+            "--include_electrostatic_self_interaction",
+            "--quadrupole_feature_corrections",
+            "--return_electrostatic_potentials",
+            "--fixedpoint_update_config",
+            "--field_readout_config",
+            "--field_feature_norms",
+            "--field_norm_factor",
+        ],
+    )
+
     # new arguments
     parser.add_argument(
         "--atomic_multipoles_key",
@@ -273,7 +298,8 @@ def extended_arg_parser() -> argparse.ArgumentParser:
             "FixedPoint",
             "LocalCharges",
             "FixedChargeBaselinedMACE",
-            "MACEQEq" #added model for qeq
+            "MACEQEq", #added model for qeq
+            "PolarMACE",  # mace-torch >=0.3.16 polarizable long-range model
         ],
         type=str,
         default="MACE",
