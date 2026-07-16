@@ -311,6 +311,13 @@ def get_param_options(model, args):
                 "lr": 0.01,
             }
         )
+        param_options["params"].append(
+            {
+                "name": "oxidation_state_mixer",
+                "params": model.oxidation_state_mixer.parameters(),
+                "weight_decay": 0.0,
+            }
+        )
         if hasattr(model, "polarizability_readouts"):
             param_options["params"].append(
                 {
@@ -372,6 +379,71 @@ def get_param_options(model, args):
                 "params": model.hardness_readouts.parameters(),
                 "weight_decay": args.weight_decay,
             }
+        )
+    if args.model == "PolarMACE":
+        # Weight-decay assignment mirrors the FixedPoint branch above (the same
+        # model family): charge/multipole sources get local_charges_weight_decay,
+        # field-response maps get field_block_weight_decay. All groups use the
+        # default learning rate; per-stage overrides are available through the
+        # group names (`<name>_lr` in the train schedule).
+        param_options["params"].append(
+            {
+                "name": "lr_source_maps",
+                "params": model.lr_source_maps.parameters(),
+                "weight_decay": args.local_charges_weight_decay,
+            }
+        )
+        param_options["params"].append(
+            {
+                "name": "fukui_source_map",
+                "params": model.fukui_source_map.parameters(),
+                "weight_decay": args.local_charges_weight_decay,
+            }
+        )
+        param_options["params"].append(
+            {
+                "name": "field_dependent_charges_maps",
+                "params": model.field_dependent_charges_maps.parameters(),
+                "weight_decay": args.field_block_weight_decay,
+            }
+        )
+        param_options["params"].append(
+            {
+                "name": "local_electron_energy",
+                "params": model.local_electron_energy.parameters(),
+                "weight_decay": args.weight_decay,
+            }
+        )
+        param_options["params"].append(
+            {
+                "name": "layer_feature_mixer",
+                "params": model.layer_feature_mixer.parameters(),
+                "weight_decay": args.weight_decay,
+            }
+        )
+
+    for group in param_options["params"]:
+        group["params"] = list(group["params"])
+    param_options["params"] = [
+        group for group in param_options["params"] if len(group["params"]) > 0
+    ]
+
+    parameters_in_groups = {
+        id(parameter)
+        for group in param_options["params"]
+        for parameter in group["params"]
+    }
+    uncovered_parameter_names = [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and id(parameter) not in parameters_in_groups
+    ]
+    if uncovered_parameter_names:
+        raise ValueError(
+            f"get_param_options: {len(uncovered_parameter_names)} trainable "
+            f"parameter(s) of {type(model).__name__} are not assigned to any "
+            "optimizer parameter group and would silently stay at their "
+            f"initialization: {uncovered_parameter_names}"
         )
     return param_options
 
