@@ -37,6 +37,12 @@ from .field_blocks import (
     EnvironmentDependentSourceBlock,
     LinearPolarizabilityReadoutBlock
 )
+from .solvent_conditioning import build_solvent_conditioning
+from .reaction_field import (
+    DdcosmoReactionField,
+    ScreenedGeneralizedBornSolvation,
+    dielectric_scaling_from_dielectric_constant,
+)
 
 from .utils import compute_total_charge_dipole, compute_polarization, get_outputs
 
@@ -206,6 +212,67 @@ class _LocalSourceModelBase(torch.nn.Module):
             pbc_handling=pbc_handling,
         )
 
+    def _init_solvation(
+        self,
+        atomic_multipoles_smearing_width: float,
+        enable_implicit_solvation: bool = False,
+        reaction_field_scheme: str = "ddcosmo",
+        solvent_conditioning: str = "none",
+        solvent_feature_basis: int = 4,
+        reaction_field_smearing_width: Optional[float] = None,
+        ddcosmo_lebedev_order: int = 29,
+        ddcosmo_max_spherical_harmonic_order: int = 6,
+    ) -> None:
+        """Build the implicit-solvation submodules (design_doc.md A2-A4).
+
+        ``self.solvent_conditioning`` is always created (an identity mixer when
+        ``solvent_conditioning == "none"``) so the forward call is unconditional. The
+        reaction-field module is created only when solvation is enabled; the forward guards
+        its use with ``hasattr(self, "reaction_field")`` (the TorchScript-safe conditional-
+        submodule pattern already used for ``polarizability_readouts``).
+        """
+        self.solvent_conditioning = build_solvent_conditioning(
+            solvent_conditioning,
+            node_feats_irreps=self.node_feats_irreps,
+            num_basis=solvent_feature_basis,
+        )
+        if not enable_implicit_solvation:
+            return
+        smearing_width = (
+            reaction_field_smearing_width
+            if reaction_field_smearing_width is not None
+            else atomic_multipoles_smearing_width
+        )
+        if reaction_field_scheme == "screened_gb":
+            self.reaction_field = ScreenedGeneralizedBornSolvation(
+                smearing_width=smearing_width
+            )
+        elif reaction_field_scheme == "ddcosmo":
+            self.reaction_field = DdcosmoReactionField(
+                smearing_width=smearing_width,
+                lebedev_order=ddcosmo_lebedev_order,
+                max_spherical_harmonic_order=ddcosmo_max_spherical_harmonic_order,
+            )
+        else:
+            raise ValueError(
+                f"Unknown reaction_field_scheme {reaction_field_scheme!r}; "
+                "choices: 'screened_gb', 'ddcosmo'."
+            )
+
+    def _dielectric_scaling_per_graph(
+        self, data: Dict[str, torch.Tensor], num_graphs: int
+    ) -> torch.Tensor:
+        """Per-graph f(eps) = (eps-1)/eps from data['dielectric_constant'] (1.0 = gas -> 0)."""
+        if "dielectric_constant" in data:
+            dielectric_constant = data["dielectric_constant"]
+        else:
+            dielectric_constant = torch.ones(
+                num_graphs,
+                dtype=torch.get_default_dtype(),
+                device=data["positions"].device,
+            )
+        return dielectric_scaling_from_dielectric_constant(dielectric_constant)
+
     def _compute_coulomb_and_field_energy(
         self,
         charge_density: torch.Tensor,
@@ -298,6 +365,13 @@ class LocalSplitCharges(_LocalSourceModelBase):
         heads: Optional[List[str]] = None,
         compute_polarizability: bool = False,
         use_linear_final_readout: bool = False,
+        enable_implicit_solvation: bool = False,
+        reaction_field_scheme: str = "ddcosmo",
+        solvent_conditioning: str = "none",
+        solvent_feature_basis: int = 4,
+        reaction_field_smearing_width: Optional[float] = None,
+        ddcosmo_lebedev_order: int = 29,
+        ddcosmo_max_spherical_harmonic_order: int = 6,
     ):
         super().__init__()
         self._init_local_model(
@@ -371,6 +445,17 @@ class LocalSplitCharges(_LocalSourceModelBase):
             atomic_multipoles_smearing_width=atomic_multipoles_smearing_width,
             include_electrostatic_self_interaction=include_electrostatic_self_interaction,
             pbc_handling=pbc_handling,
+        )
+
+        self._init_solvation(
+            atomic_multipoles_smearing_width=atomic_multipoles_smearing_width,
+            enable_implicit_solvation=enable_implicit_solvation,
+            reaction_field_scheme=reaction_field_scheme,
+            solvent_conditioning=solvent_conditioning,
+            solvent_feature_basis=solvent_feature_basis,
+            reaction_field_smearing_width=reaction_field_smearing_width,
+            ddcosmo_lebedev_order=ddcosmo_lebedev_order,
+            ddcosmo_max_spherical_harmonic_order=ddcosmo_max_spherical_harmonic_order,
         )
 
     def forward(
@@ -468,6 +553,21 @@ class LocalSplitCharges(_LocalSourceModelBase):
         # mix oxidation states into embedding
         node_feats = self.oxidation_state_mixer(data["node_attrs"], node_feats, FQ)
 
+        # mix the solvent (dielectric) context into the embedding so it propagates into the
+        # interactions, energy readouts, and the multipole source maps (design_doc.md A3).
+        # Identity when solvent conditioning is disabled; exactly zero shift at eps = 1 (gas).
+        # The conditioning block converts eps -> the bounded feature 1 - 1/eps internally, so
+        # it receives the raw per-node dielectric constant.
+        if "dielectric_constant" in data:
+            node_dielectric_constant = data["dielectric_constant"][data["batch"]]
+        else:
+            node_dielectric_constant = torch.ones(
+                data["batch"].size(0),
+                dtype=torch.get_default_dtype(),
+                device=data["positions"].device,
+            )
+        node_feats = self.solvent_conditioning(node_feats, node_dielectric_constant)
+
         # Interactions
         energies = [e0]
         node_energies_list = [node_e0]
@@ -543,6 +643,25 @@ class LocalSplitCharges(_LocalSourceModelBase):
             volume=volume,
             external_field=external_field,
         )
+
+        # implicit-solvation reaction field (design_doc.md A2/A4). One-shot functional of the
+        # predicted monopole density + geometry + dielectric scaling f(eps). Exactly zero at
+        # eps = 1 (gas), so gas records reproduce gas DFT with the field off and no double
+        # counting. hasattr guard is the TorchScript-safe conditional-submodule pattern.
+        if hasattr(self, "reaction_field"):
+            dielectric_scaling = self._dielectric_scaling_per_graph(data, num_graphs)
+            monopole_charges = charge_density[:, 0]
+            per_atom_atomic_numbers = self.atomic_numbers[
+                torch.argmax(data["node_attrs"], dim=1)
+            ]
+            reaction_field_energy = self.reaction_field(
+                monopole_charges,
+                data["positions"],
+                per_atom_atomic_numbers,
+                data["batch"],
+                dielectric_scaling,
+            )
+            total_energy = total_energy + reaction_field_energy
 
         # cartesian polarization
         if hasattr(self, "polarizability_readouts"):

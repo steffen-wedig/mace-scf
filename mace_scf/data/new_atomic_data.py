@@ -30,6 +30,7 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         "fermi_level_key",
         "external_field_key",
         "polarizability_key",
+        "dielectric_constant_key",
     ]
     arrays = [
         "forces_key",
@@ -57,6 +58,7 @@ class ExtAtomicData(AtomicData):
     volume: torch.Tensor
     pbc: torch.Tensor
     total_charge: torch.Tensor
+    dielectric_constant: torch.Tensor
     external_field: torch.Tensor
     fermi_level: torch.Tensor
     fermi_level_weight: torch.Tensor
@@ -80,6 +82,8 @@ class ExtAtomicData(AtomicData):
         volume = kwargs.pop("volume", None)  # [1]
         pbc = kwargs.pop("pbc", None)  # [3,1]
         total_charge = kwargs.pop("total_charge", None)  # [1]
+        # Per-config dielectric constant (eps) for implicit solvation; 1.0 == gas phase.
+        dielectric_constant = kwargs.pop("dielectric_constant", None)  # [1]
         external_field = kwargs.pop("external_field", None)  # [3]
         fermi_level = kwargs.pop("fermi_level", None)  # [1]
         fermi_level_weight = kwargs.pop("fermi_level_weight", None)  # [,]
@@ -102,6 +106,7 @@ class ExtAtomicData(AtomicData):
             electrostatic_potentials is None or electrostatic_potentials.shape[-1] == 1
         )
         assert total_charge is None or len(total_charge.shape) == 0
+        assert dielectric_constant is None or len(dielectric_constant.shape) == 0
         assert external_field is None or external_field.shape == torch.Size([1, 3])
         assert fermi_level is None or len(fermi_level.shape) == 0
         assert fermi_level_weight is None or len(fermi_level_weight.shape) == 0
@@ -119,6 +124,7 @@ class ExtAtomicData(AtomicData):
             "rcell": rcell,
             "pbc": pbc,
             "total_charge": total_charge,
+            "dielectric_constant": dielectric_constant,
             "external_field": external_field,
             "fermi_level": fermi_level,
             "fermi_level_weight": fermi_level_weight,
@@ -211,6 +217,17 @@ class ExtAtomicData(AtomicData):
             )
             if config.properties.get("total_charge") is not None
             else torch.tensor(0.0, dtype=torch.get_default_dtype())
+        )
+        # Per-config dielectric constant (eps) for implicit solvation; default 1.0 = gas
+        # phase (no reaction field). The model converts eps to the bounded conditioning
+        # feature 1 - 1/eps internally.
+        dielectric_constant = (
+            torch.tensor(
+                config.properties.get("dielectric_constant"),
+                dtype=torch.get_default_dtype(),
+            )
+            if config.properties.get("dielectric_constant") is not None
+            else torch.tensor(1.0, dtype=torch.get_default_dtype())
         )
         external_field = (
             torch.tensor(
@@ -308,6 +325,7 @@ class ExtAtomicData(AtomicData):
             rcell=rcell,
             pbc=pbc,
             total_charge=total_charge,
+            dielectric_constant=dielectric_constant,
             # mace-torch >=0.3.16 (PolarMACE) reads data["total_spin"] in forward.
             # base AtomicData.from_config already computed it (default 1.0 = singlet
             # multiplicity); this reconstruction previously dropped it. Pass it through

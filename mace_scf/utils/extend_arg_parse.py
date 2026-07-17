@@ -92,6 +92,43 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--atomic_multipoles_max_l", type=int, default=1)
     parser.add_argument("--atomic_multipoles_smearing_width", type=float, default=1.5)
     parser.add_argument("--kspace_cutoff_factor", type=float, default=1.0)
+    # --- implicit solvation (design_doc.md Part A) ---
+    parser.add_argument(
+        "--enable_implicit_solvation",
+        type=strict_str2bool,
+        default=False,
+        help="Add the continuum reaction-field term to the total energy (LocalSplitCharges).",
+    )
+    parser.add_argument(
+        "--reaction_field_scheme",
+        type=str,
+        default="ddcosmo",
+        choices=["ddcosmo", "screened_gb"],
+        help="Continuum scheme: 'ddcosmo' (production) or 'screened_gb' (Exp-4 baseline).",
+    )
+    parser.add_argument(
+        "--solvent_conditioning",
+        type=str,
+        default="none",
+        choices=["none", "sum"],
+        help="How the dielectric feature (1 - 1/eps) is mixed into the node embedding.",
+    )
+    parser.add_argument("--solvent_feature_basis", type=int, default=4)
+    parser.add_argument(
+        "--reaction_field_smearing_width",
+        type=float,
+        default=None,
+        help="Gaussian width for the reaction field; defaults to "
+        "atomic_multipoles_smearing_width when unset.",
+    )
+    parser.add_argument("--ddcosmo_lebedev_order", type=int, default=29)
+    parser.add_argument("--ddcosmo_max_spherical_harmonic_order", type=int, default=6)
+    parser.add_argument(
+        "--dielectric_constant_key",
+        type=str,
+        default=None,
+        help="Config info key holding the per-structure dielectric constant (eps).",
+    )
     parser.add_argument("--atomic_formal_charges", type=str, default="{}")
     parser.add_argument(
         "--formal_charges_from_data", action="store_true", default=False

@@ -143,6 +143,13 @@ def build_model(
             compute_polarizability=args.compute_polarizability,
             use_linear_final_readout=args.use_linear_final_readout,
             pbc_handling=args.electrostatic_pbc_method,
+            enable_implicit_solvation=args.enable_implicit_solvation,
+            reaction_field_scheme=args.reaction_field_scheme,
+            solvent_conditioning=args.solvent_conditioning,
+            solvent_feature_basis=args.solvent_feature_basis,
+            reaction_field_smearing_width=args.reaction_field_smearing_width,
+            ddcosmo_lebedev_order=args.ddcosmo_lebedev_order,
+            ddcosmo_max_spherical_harmonic_order=args.ddcosmo_max_spherical_harmonic_order,
         )
     elif args.model == "LocalCharges":
         model = electrostatics.LocalCharges(
@@ -325,6 +332,25 @@ def get_param_options(model, args):
                     "params": model.polarizability_readouts.parameters(),
                     "weight_decay": 0.0,
                     "lr": 0.01,
+                }
+            )
+        # Implicit-solvation submodules. The solvent-conditioning mixer has trainable
+        # weights only in the "sum" variant (o3.Linear); the reaction-field modules have
+        # none (fixed physics + buffers). Empty groups are filtered out below.
+        if hasattr(model, "solvent_conditioning"):
+            param_options["params"].append(
+                {
+                    "name": "solvent_conditioning",
+                    "params": model.solvent_conditioning.parameters(),
+                    "weight_decay": 0.0,
+                }
+            )
+        if hasattr(model, "reaction_field"):
+            param_options["params"].append(
+                {
+                    "name": "reaction_field",
+                    "params": model.reaction_field.parameters(),
+                    "weight_decay": 0.0,
                 }
             )
     if args.model == "LocalCharges":
