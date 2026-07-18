@@ -477,7 +477,7 @@ class DdcosmoReactionField(torch.nn.Module):
         padded_dipoles = torch.zeros(
             number_of_graphs, max_atoms, 3, dtype=positions.dtype, device=positions.device
         )
-        if atomic_dipoles is not None:
+        if self.solute_multipole_max_l >= 1 and atomic_dipoles is not None:
             dipoles_cartesian = atomic_dipoles.index_select(1, self.e3nn_to_cartesian_l1)
             padded_dipoles = torch.zeros(
                 padded_size, 3, dtype=positions.dtype, device=positions.device
