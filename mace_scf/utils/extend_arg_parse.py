@@ -124,6 +124,13 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ddcosmo_lebedev_order", type=int, default=29)
     parser.add_argument("--ddcosmo_max_spherical_harmonic_order", type=int, default=6)
     parser.add_argument(
+        "--solute_multipole_max_l",
+        type=int,
+        default=0,
+        help="Highest solute multipole entering the reaction field: 0 = monopole only "
+        "(default), 1 = monopole + the predicted atomic dipoles (ddCOSMO only).",
+    )
+    parser.add_argument(
         "--dielectric_constant_key",
         type=str,
         default=None,

@@ -314,6 +314,109 @@ def test_ragged_batch_gradient_flows_through_padding():
     assert torch.allclose(analytic_gradient, finite_difference, atol=1e-6)
 
 
+def _dipole_e3nn_along_axis(cartesian_axis, magnitude):
+    """Build an e3nn-ordered l=1 dipole (y, z, x) pointing along a cartesian axis."""
+    e3nn_index = {0: 2, 1: 0, 2: 1}[cartesian_axis]  # x->2, y->0, z->1
+    components = [0.0, 0.0, 0.0]
+    components[e3nn_index] = magnitude
+    return components
+
+
+@pytest.mark.parametrize("cartesian_axis", [0, 1, 2])
+def test_isolated_atom_dipole_self_energy(cartesian_axis):
+    """Isolated atom: ddCOSMO reduces to the Kirkwood single-sphere dipole self-energy.
+
+    Closed form (conductor limit scaled by f(eps)): E = -0.5 f k |d|^2 / r^3, independent of
+    orientation. Testing each cartesian axis also checks the e3nn(y,z,x)->cartesian(x,y,z) map.
+    """
+    from mace_scf.electrostatics.reaction_field.screened_potential import (
+        COULOMB_CONSTANT_EV_ANGSTROM,
+    )
+
+    module = DdcosmoReactionField(
+        smearing_width=1e-3, lebedev_order=29, max_spherical_harmonic_order=6,
+        solute_multipole_max_l=1, solve_ridge=0.0,
+    )
+    dielectric_constant = 78.3553
+    f_epsilon = dielectric_scaling(dielectric_constant)
+    atomic_number = 8
+    radius = _cavity_radius(atomic_number)
+    dipole_magnitude = 0.5
+    dipoles = torch.tensor([_dipole_e3nn_along_axis(cartesian_axis, dipole_magnitude)])
+    charges = torch.tensor([0.0])
+    positions = torch.tensor([[0.0, 0.0, 0.0]])
+    atomic_numbers = torch.tensor([atomic_number], dtype=torch.long)
+    batch = torch.tensor([0], dtype=torch.long)
+
+    energy = module(
+        charges, positions, atomic_numbers, batch, torch.tensor([f_epsilon]), dipoles
+    ).item()
+    expected = (
+        -0.5 * f_epsilon * COULOMB_CONSTANT_EV_ANGSTROM * dipole_magnitude**2 / radius**3
+    )
+    assert energy < 0.0
+    assert abs(energy - expected) / abs(expected) < 1e-5
+
+
+def test_isolated_atom_monopole_plus_dipole_additive():
+    """Isolated atom: monopole and dipole self-energies add with no cross term."""
+    from mace_scf.electrostatics.reaction_field.screened_potential import (
+        COULOMB_CONSTANT_EV_ANGSTROM,
+    )
+
+    module = DdcosmoReactionField(
+        smearing_width=1e-3, lebedev_order=29, max_spherical_harmonic_order=6,
+        solute_multipole_max_l=1, solve_ridge=0.0,
+    )
+    f_epsilon = dielectric_scaling(78.3553)
+    atomic_number = 8
+    radius = _cavity_radius(atomic_number)
+    charge = 0.7
+    dipole_magnitude = 0.5
+    dipoles = torch.tensor([_dipole_e3nn_along_axis(2, dipole_magnitude)])  # along z
+    energy = module(
+        torch.tensor([charge]),
+        torch.tensor([[0.0, 0.0, 0.0]]),
+        torch.tensor([atomic_number], dtype=torch.long),
+        torch.tensor([0], dtype=torch.long),
+        torch.tensor([f_epsilon]),
+        dipoles,
+    ).item()
+    expected = -0.5 * f_epsilon * COULOMB_CONSTANT_EV_ANGSTROM * (
+        charge**2 / radius + dipole_magnitude**2 / radius**3
+    )
+    assert abs(energy - expected) / abs(expected) < 1e-5
+
+
+def test_dipole_gas_limit_zero():
+    """At eps == 1 the dipole-enabled reaction field (and its gradient) is exactly zero."""
+    module = DdcosmoReactionField(smearing_width=1.5, solute_multipole_max_l=1)
+    charges, positions, atomic_numbers, batch = _tensors(
+        WATER_POSITIONS, WATER_CHARGES, WATER_ATOMIC_NUMBERS, [0, 0, 0]
+    )
+    positions = positions.requires_grad_(True)
+    dipoles = torch.tensor([[0.1, -0.2, 0.05], [0.0, 0.1, 0.0], [0.1, 0.0, -0.1]])
+    energy = module(
+        charges, positions, atomic_numbers, batch, torch.tensor([dielectric_scaling(1.0)]), dipoles
+    )
+    assert torch.equal(energy, torch.zeros_like(energy))
+    (gradient,) = torch.autograd.grad(energy.sum(), positions)
+    assert torch.equal(gradient, torch.zeros_like(gradient))
+
+
+def test_dipole_module_torchscript_matches_eager():
+    module = DdcosmoReactionField(smearing_width=1.5, solute_multipole_max_l=1)
+    scripted = torch.jit.script(module)
+    charges, positions, atomic_numbers, batch = _tensors(
+        WATER_POSITIONS, WATER_CHARGES, WATER_ATOMIC_NUMBERS, [0, 0, 0]
+    )
+    dipoles = torch.tensor([[0.1, -0.2, 0.05], [0.0, 0.1, 0.0], [0.1, 0.0, -0.1]])
+    scaling = torch.tensor([dielectric_scaling(78.3553)])
+    eager = module(charges, positions, atomic_numbers, batch, scaling, dipoles)
+    scripted_energy = scripted(charges, positions, atomic_numbers, batch, scaling, dipoles)
+    assert torch.allclose(eager, scripted_energy, atol=1e-10)
+
+
 def test_eps_scaling_and_monotonicity():
     module = _default_module()
     charges, positions, atomic_numbers, batch = _tensors(

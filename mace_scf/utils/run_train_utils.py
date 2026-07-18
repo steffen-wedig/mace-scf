@@ -150,6 +150,7 @@ def build_model(
             reaction_field_smearing_width=args.reaction_field_smearing_width,
             ddcosmo_lebedev_order=args.ddcosmo_lebedev_order,
             ddcosmo_max_spherical_harmonic_order=args.ddcosmo_max_spherical_harmonic_order,
+            solute_multipole_max_l=args.solute_multipole_max_l,
         )
     elif args.model == "LocalCharges":
         model = electrostatics.LocalCharges(

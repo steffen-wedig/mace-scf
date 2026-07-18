@@ -37,6 +37,7 @@ so molecule A's cavity never sees molecule B regardless of how the batch is laid
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 import numpy
 import torch
@@ -98,6 +99,7 @@ class DdcosmoReactionField(torch.nn.Module):
         max_spherical_harmonic_order: int = 6,
         regularization_eta: float = 0.1,
         solve_ridge: float = 1.0e-8,
+        solute_multipole_max_l: int = 0,
     ) -> None:
         super().__init__()
         self.smearing_width = float(smearing_width)
@@ -108,6 +110,19 @@ class DdcosmoReactionField(torch.nn.Module):
         self.coulomb_constant = COULOMB_CONSTANT_EV_ANGSTROM
         self.number_of_lm = (self.max_spherical_harmonic_order + 1) ** 2
         self.sqrt_four_pi = math.sqrt(4.0 * math.pi)
+        # Solute multipole order: 0 = monopole only (default); 1 = monopole + the predicted
+        # atomic dipoles (design_doc: the LSC density carries l=1 atomic multipoles). The l=1
+        # solute enters both the RHS (a dipole potential on the cavity grid) and psi.
+        self.solute_multipole_max_l = int(solute_multipole_max_l)
+        if self.solute_multipole_max_l not in (0, 1):
+            raise ValueError("solute_multipole_max_l must be 0 (monopole) or 1 (with dipole)")
+        if self.solute_multipole_max_l >= 1 and self.max_spherical_harmonic_order < 1:
+            raise ValueError("a dipole solute needs max_spherical_harmonic_order >= 1")
+        # psi normalisation for a point dipole at the sphere centre: psi[a,1m] = sqrt(4pi/3) d/r^2.
+        self.dipole_psi_scale = math.sqrt(4.0 * math.pi / 3.0)
+        # erf-screening constant alpha = 1/(sqrt2 * width): erf(alpha * r) enters the kernels.
+        self.screening_alpha = 0.5 / self.point_effective_width
+        self.two_alpha_over_sqrt_pi = 2.0 * self.screening_alpha / math.sqrt(math.pi)
 
         # --- lazily import pyscf only for the one-time frozen-grid precomputation ---
         from pyscf import gto
@@ -181,6 +196,11 @@ class DdcosmoReactionField(torch.nn.Module):
             torch.tensor(four_pi_over_two_l_plus_one, dtype=default_dtype),
         )
         self.register_buffer("cavity_radius_lookup", build_cavity_radius_lookup(default_dtype))
+        # e3nn orders l=1 as (y, z, x); pyscf's real solid harmonics (and this module) use
+        # (x, y, z). This permutation maps the density's e3nn dipole -> cartesian (x, y, z).
+        self.register_buffer(
+            "e3nn_to_cartesian_l1", torch.tensor([2, 0, 1], dtype=torch.long)
+        )
 
     def _regularize_switching(self, scaled_distance: Tensor) -> Tensor:
         """ddCOSMO switching function ``chi_eta`` (pyscf.solvent.ddcosmo.regularize_xt).
@@ -231,12 +251,30 @@ class DdcosmoReactionField(torch.nn.Module):
         )  # [number_of_cartesians_total, n_points]
         return self.cart2sph_blockdiagonal.t() @ monomials  # [number_of_lm, n_points]
 
+    def _screened_dipole_radial(self, distance: Tensor) -> Tensor:
+        """Radial factor ``h(s)`` of the screened dipole potential: ``phi_dip = k h(s) (d . s)``.
+
+        ``h(s) = erf(alpha s)/s^3 - (2 alpha/sqrt(pi)) exp(-alpha^2 s^2)/s^2`` -- the source-
+        position gradient of the screened monopole kernel. It is finite as ``s -> 0`` (the two
+        singular terms cancel), and in ddCOSMO ``s`` is always a cavity-point-to-atom distance
+        (>= a cavity radius), so it is never evaluated near zero.
+        """
+        guarded = distance + 1.0e-12
+        alpha = self.screening_alpha
+        squared = guarded * guarded
+        erf_term = torch.erf(alpha * distance) / (squared * guarded)
+        gauss_term = self.two_alpha_over_sqrt_pi * torch.exp(
+            -(alpha * alpha) * distance * distance
+        ) / squared
+        return erf_term - gauss_term
+
     def _batched_reaction_field_energy(
         self,
         positions: Tensor,
         charges: Tensor,
         cavity_radii: Tensor,
         atom_valid: Tensor,
+        atomic_dipoles_cartesian: Tensor,
     ) -> Tensor:
         """f(eps)-independent ddCOSMO energy ``0.5 * <psi, L^{-1} phi>`` for a padded batch.
 
@@ -293,6 +331,14 @@ class DdcosmoReactionField(torch.nn.Module):
         potential = self.coulomb_constant * (
             charges.view(number_of_graphs, 1, 1, max_atoms) * kernel
         ).sum(dim=3)  # [n_graphs, a, n_grid]
+        if self.solute_multipole_max_l >= 1:
+            # Solute atomic dipoles add a dipole potential k * h(s) * (d_b . (cav - R_b)) on the
+            # cavity grid (padding dipoles are zero, so summing over all b is safe).
+            dipole_radial = self._screened_dipole_radial(distance)  # [n_graphs, a, n_grid, b]
+            dipole_dot = (
+                atomic_dipoles_cartesian.view(number_of_graphs, 1, 1, max_atoms, 3) * displacement
+            ).sum(dim=4)  # [n_graphs, a, n_grid, b]
+            potential = potential + self.coulomb_constant * (dipole_radial * dipole_dot).sum(dim=3)
         weighted = (
             self.lebedev_weights.view(1, 1, number_of_grid_points) * exposure * potential
         )
@@ -365,6 +411,15 @@ class DdcosmoReactionField(torch.nn.Module):
             device=positions.device,
         )
         source_projection[:, :, 0] = self.sqrt_four_pi * charges / cavity_radii
+        if self.solute_multipole_max_l >= 1:
+            # psi[a, 1:4] = sqrt(4pi/3) * d_cart / r^2 (columns 1,2,3 are l=1 m=-1,0,+1 = x,y,z,
+            # matching atomic_dipoles_cartesian). Padding dipoles are zero -> no contribution.
+            inverse_radius_squared = 1.0 / (cavity_radii * cavity_radii)
+            source_projection[:, :, 1:4] = (
+                self.dipole_psi_scale
+                * atomic_dipoles_cartesian
+                * inverse_radius_squared.view(number_of_graphs, max_atoms, 1)
+            )
         energy = 0.5 * (source_projection * surface_coefficients).reshape(
             number_of_graphs, -1
         ).sum(dim=1)
@@ -377,6 +432,7 @@ class DdcosmoReactionField(torch.nn.Module):
         atomic_numbers: Tensor,
         batch: Tensor,
         dielectric_scaling: Tensor,
+        atomic_dipoles: Optional[Tensor] = None,
     ) -> Tensor:
         number_of_graphs = int(dielectric_scaling.shape[0])
         number_of_atoms = positions.shape[0]
@@ -415,7 +471,21 @@ class DdcosmoReactionField(torch.nn.Module):
             max_atoms, device=positions.device
         ).view(1, max_atoms) < counts.view(number_of_graphs, 1)  # [n_graphs, max_atoms]
 
+        # Pack the atomic dipoles (converted from e3nn (y,z,x) to cartesian (x,y,z)) the same way.
+        # Always build a [n_graphs, max_atoms, 3] tensor (zeros when no dipoles are supplied); the
+        # batched energy uses it only when solute_multipole_max_l >= 1.
+        padded_dipoles = torch.zeros(
+            number_of_graphs, max_atoms, 3, dtype=positions.dtype, device=positions.device
+        )
+        if atomic_dipoles is not None:
+            dipoles_cartesian = atomic_dipoles.index_select(1, self.e3nn_to_cartesian_l1)
+            padded_dipoles = torch.zeros(
+                padded_size, 3, dtype=positions.dtype, device=positions.device
+            ).index_copy(0, linear_index, dipoles_cartesian).view(
+                number_of_graphs, max_atoms, 3
+            )
+
         energies = self._batched_reaction_field_energy(
-            padded_positions, padded_charges, padded_radii, atom_valid
+            padded_positions, padded_charges, padded_radii, atom_valid, padded_dipoles
         )
         return energies * dielectric_scaling

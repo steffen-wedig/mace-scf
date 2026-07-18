@@ -222,6 +222,7 @@ class _LocalSourceModelBase(torch.nn.Module):
         reaction_field_smearing_width: Optional[float] = None,
         ddcosmo_lebedev_order: int = 29,
         ddcosmo_max_spherical_harmonic_order: int = 6,
+        solute_multipole_max_l: int = 0,
     ) -> None:
         """Build the implicit-solvation submodules (design_doc.md A2-A4).
 
@@ -252,6 +253,7 @@ class _LocalSourceModelBase(torch.nn.Module):
                 smearing_width=smearing_width,
                 lebedev_order=ddcosmo_lebedev_order,
                 max_spherical_harmonic_order=ddcosmo_max_spherical_harmonic_order,
+                solute_multipole_max_l=solute_multipole_max_l,
             )
         else:
             raise ValueError(
@@ -372,6 +374,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
         reaction_field_smearing_width: Optional[float] = None,
         ddcosmo_lebedev_order: int = 29,
         ddcosmo_max_spherical_harmonic_order: int = 6,
+        solute_multipole_max_l: int = 0,
     ):
         super().__init__()
         self._init_local_model(
@@ -456,6 +459,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
             reaction_field_smearing_width=reaction_field_smearing_width,
             ddcosmo_lebedev_order=ddcosmo_lebedev_order,
             ddcosmo_max_spherical_harmonic_order=ddcosmo_max_spherical_harmonic_order,
+            solute_multipole_max_l=solute_multipole_max_l,
         )
 
     def forward(
@@ -654,12 +658,19 @@ class LocalSplitCharges(_LocalSourceModelBase):
             per_atom_atomic_numbers = self.atomic_numbers[
                 torch.argmax(data["node_attrs"], dim=1)
             ]
+            # Pass the predicted atomic dipoles (l=1 density, e3nn order) when present; the
+            # reaction field uses them only if it was built with solute_multipole_max_l >= 1
+            # (ddCOSMO), and ignores them otherwise (screened-GB is monopole-only).
+            atomic_dipoles: Optional[torch.Tensor] = None
+            if charge_density.shape[1] >= 4:
+                atomic_dipoles = charge_density[:, 1:4]
             reaction_field_energy = self.reaction_field(
                 monopole_charges,
                 data["positions"],
                 per_atom_atomic_numbers,
                 data["batch"],
                 dielectric_scaling,
+                atomic_dipoles,
             )
             total_energy = total_energy + reaction_field_energy
 

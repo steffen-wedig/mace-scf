@@ -26,6 +26,8 @@ Units: eV / Angstrom / elementary-charge. ``dG_GB < 0`` for a polar solute in po
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 from mace.tools.scatter import scatter_sum
 from torch import Tensor
@@ -165,7 +167,11 @@ class ScreenedGeneralizedBornSolvation(torch.nn.Module):
         atomic_numbers: Tensor,
         batch: Tensor,
         dielectric_scaling: Tensor,
+        atomic_dipoles: Optional[Tensor] = None,
     ) -> Tensor:
+        # ``atomic_dipoles`` is accepted for a uniform reaction-field interface but ignored:
+        # generalized-Born is intrinsically a monopole (Born) model. The disposable GB baseline
+        # stays monopole-only by construction.
         number_of_graphs = int(dielectric_scaling.shape[0])
         born_radius = self.compute_born_radii(positions, atomic_numbers, batch)
 
