@@ -47,6 +47,17 @@ WATER_POSITIONS = [
 WATER_CHARGES = [-0.8, 0.4, 0.4]
 WATER_ATOMIC_NUMBERS = [8, 1, 1]
 
+# A differently sized molecule (methane, 5 atoms) to exercise the padded batch path.
+METHANE_POSITIONS = [
+    [0.000, 0.000, 0.000],
+    [0.629, 0.629, 0.629],
+    [-0.629, -0.629, 0.629],
+    [-0.629, 0.629, -0.629],
+    [0.629, -0.629, -0.629],
+]
+METHANE_CHARGES = [-0.4, 0.1, 0.1, 0.1, 0.1]
+METHANE_ATOMIC_NUMBERS = [6, 1, 1, 1, 1]
+
 MODIFIED_BONDI = {1: 1.10, 6: 1.70, 7: 1.55, 8: 1.52, 9: 1.47, 16: 1.80, 17: 1.75}
 
 
@@ -218,6 +229,89 @@ def test_batch_isolation():
     )
     assert torch.allclose(batched_energy[0], energy_a[0], atol=1e-10)
     assert torch.allclose(batched_energy[1], energy_b[0], atol=1e-10)
+
+
+@pytest.mark.parametrize("water_first", [True, False])
+def test_ragged_batch_matches_single_molecules(water_first):
+    """Padded batch of differently sized molecules == solving each one separately."""
+    module = _default_module()
+    scaling_water = dielectric_scaling(78.3553)
+    scaling_methane = dielectric_scaling(20.5)
+
+    water_charges, water_positions, water_z, _ = _tensors(
+        WATER_POSITIONS, WATER_CHARGES, WATER_ATOMIC_NUMBERS, [0, 0, 0]
+    )
+    methane_charges, methane_positions, methane_z, _ = _tensors(
+        METHANE_POSITIONS, METHANE_CHARGES, METHANE_ATOMIC_NUMBERS, [0, 0, 0, 0, 0]
+    )
+    energy_water = module(
+        water_charges, water_positions, water_z, torch.tensor([0, 0, 0]),
+        torch.tensor([scaling_water]),
+    )[0]
+    energy_methane = module(
+        methane_charges, methane_positions, methane_z, torch.tensor([0, 0, 0, 0, 0]),
+        torch.tensor([scaling_methane]),
+    )[0]
+
+    if water_first:
+        order = [(water_charges, water_positions, water_z, 3),
+                 (methane_charges, methane_positions, methane_z, 5)]
+        expected = [energy_water, energy_methane]
+        scalings = [scaling_water, scaling_methane]
+    else:
+        order = [(methane_charges, methane_positions, methane_z, 5),
+                 (water_charges, water_positions, water_z, 3)]
+        expected = [energy_methane, energy_water]
+        scalings = [scaling_methane, scaling_water]
+
+    batched_charges = torch.cat([entry[0] for entry in order])
+    batched_positions = torch.cat([entry[1] for entry in order])
+    batched_z = torch.cat([entry[2] for entry in order])
+    batched_batch = torch.cat(
+        [torch.full((entry[3],), graph_index, dtype=torch.long)
+         for graph_index, entry in enumerate(order)]
+    )
+    batched_energy = module(
+        batched_charges, batched_positions, batched_z, batched_batch, torch.tensor(scalings)
+    )
+    assert torch.allclose(batched_energy[0], expected[0], atol=1e-10)
+    assert torch.allclose(batched_energy[1], expected[1], atol=1e-10)
+
+
+def test_ragged_batch_gradient_flows_through_padding():
+    """Gradients w.r.t. positions are correct in the padded batch (smaller molecule padded)."""
+    module = _default_module()
+    water_charges, water_positions, water_z, _ = _tensors(
+        WATER_POSITIONS, WATER_CHARGES, WATER_ATOMIC_NUMBERS, [0, 0, 0]
+    )
+    methane_charges, methane_positions, methane_z, _ = _tensors(
+        METHANE_POSITIONS, METHANE_CHARGES, METHANE_ATOMIC_NUMBERS, [0, 0, 0, 0, 0]
+    )
+    batched_charges = torch.cat([water_charges, methane_charges])
+    batched_positions = torch.cat([water_positions, methane_positions]).requires_grad_(True)
+    batched_z = torch.cat([water_z, methane_z])
+    batched_batch = torch.tensor([0, 0, 0, 1, 1, 1, 1, 1], dtype=torch.long)
+    scaling = torch.tensor([dielectric_scaling(78.3553), dielectric_scaling(20.5)])
+
+    energy = module(batched_charges, batched_positions, batched_z, batched_batch, scaling).sum()
+    (analytic_gradient,) = torch.autograd.grad(energy, batched_positions)
+
+    step = 1e-5
+    finite_difference = torch.zeros_like(batched_positions)
+    for atom_index in range(batched_positions.shape[0]):
+        for component in range(3):
+            shifted_plus = batched_positions.detach().clone()
+            shifted_plus[atom_index, component] += step
+            shifted_minus = batched_positions.detach().clone()
+            shifted_minus[atom_index, component] -= step
+            energy_plus = module(
+                batched_charges, shifted_plus, batched_z, batched_batch, scaling
+            ).sum()
+            energy_minus = module(
+                batched_charges, shifted_minus, batched_z, batched_batch, scaling
+            ).sum()
+            finite_difference[atom_index, component] = (energy_plus - energy_minus) / (2 * step)
+    assert torch.allclose(analytic_gradient, finite_difference, atol=1e-6)
 
 
 def test_eps_scaling_and_monotonicity():

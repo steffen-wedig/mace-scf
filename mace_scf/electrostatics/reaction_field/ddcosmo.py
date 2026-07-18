@@ -231,115 +231,144 @@ class DdcosmoReactionField(torch.nn.Module):
         )  # [number_of_cartesians_total, n_points]
         return self.cart2sph_blockdiagonal.t() @ monomials  # [number_of_lm, n_points]
 
-    def _graph_reaction_field_energy(
+    def _batched_reaction_field_energy(
         self,
         positions: Tensor,
         charges: Tensor,
         cavity_radii: Tensor,
+        atom_valid: Tensor,
     ) -> Tensor:
-        """f(eps)-independent ddCOSMO energy ``0.5 * <psi, L^{-1} phi>`` for one molecule.
+        """f(eps)-independent ddCOSMO energy ``0.5 * <psi, L^{-1} phi>`` for a padded batch.
 
-        Fully vectorised over atom pairs. The earlier per-atom Python double loops (burial and
-        the neighbour-coupling matrix build) were the ddCOSMO bottleneck: each of their O(n^2)
-        iterations launched several tiny GPU kernels and grew the autograd graph. This form does
-        the same arithmetic with batched tensor ops, so it is identical up to floating point.
+        Inputs are dense ``[n_graphs, max_atoms, ...]`` tensors with ``atom_valid`` marking the
+        real atoms (padding atoms carry charge 0 and cavity radius 1). Every molecule keeps its
+        own surface solve: the pair mask (``valid_a & valid_b & a != b``) zeros all couplings that
+        touch a padding atom, so each molecule's block is exactly the single-molecule ddCOSMO
+        matrix, the padding rows decouple into a trivial diagonal block, and a padding atom's zero
+        charge makes its ``psi`` -- and hence its energy contribution -- exactly zero. The result
+        is therefore identical (up to floating point) to solving each molecule separately, but as
+        one batched ``torch.linalg.solve`` -- which is what lets a larger batch actually speed
+        ddCOSMO up on the GPU (small molecules otherwise underutilise it one solve at a time).
+
+        Fully vectorised over both atom pairs and graphs; TorchScript-scriptable.
         """
-        number_of_atoms = positions.shape[0]
+        number_of_graphs = positions.shape[0]
+        max_atoms = positions.shape[1]
         number_of_grid_points = self.number_of_grid_points
         number_of_lm = self.number_of_lm
 
-        # cavity grid points: [n_atoms, n_grid, 3]
+        # cavity grid points: [n_graphs, max_atoms, n_grid, 3]
         cavity_points = (
-            cavity_radii.view(number_of_atoms, 1, 1)
-            * self.lebedev_coordinates.view(1, number_of_grid_points, 3)
-            + positions.view(number_of_atoms, 1, 3)
+            cavity_radii.view(number_of_graphs, max_atoms, 1, 1)
+            * self.lebedev_coordinates.view(1, 1, number_of_grid_points, 3)
+            + positions.view(number_of_graphs, max_atoms, 1, 3)
         )
 
-        # Every cavity point of atom a relative to every atom b: [n_a, n_grid, n_b, 3]. Reused
-        # for the burial, the solute potential, and the neighbour solid harmonics.
-        displacement = cavity_points.unsqueeze(2) - positions.view(1, 1, number_of_atoms, 3)
-        distance = torch.linalg.norm(displacement, dim=3)  # [n_a, n_grid, n_b]
+        # Every cavity point of atom a relative to every atom b: [n_graphs, a, n_grid, b, 3].
+        displacement = cavity_points.unsqueeze(3) - positions.view(
+            number_of_graphs, 1, 1, max_atoms, 3
+        )
+        distance = torch.linalg.norm(displacement, dim=4)  # [n_graphs, a, n_grid, b]
 
-        # Off-diagonal mask reproduces the pair loops' ``b != a`` skip exactly. (A point on atom
-        # a's own sphere sits at distance == r_vdw[a], which the switching function already sends
-        # to ~0, but masking makes the self term exactly zero as the explicit ``continue`` did.)
-        off_diagonal = 1.0 - torch.eye(
-            number_of_atoms, dtype=positions.dtype, device=positions.device
-        )  # [n_a, n_b]
+        # Valid ordered atom pairs within a molecule (a != b, both real). Reproduces the pair
+        # loops' ``b != a`` skip AND excludes padding atoms so molecules stay isolated.
+        not_self = ~torch.eye(max_atoms, dtype=torch.bool, device=positions.device)
+        valid_pair = (
+            atom_valid.view(number_of_graphs, max_atoms, 1)
+            & atom_valid.view(number_of_graphs, 1, max_atoms)
+            & not_self.view(1, max_atoms, max_atoms)
+        ).to(positions.dtype)  # [n_graphs, a, b]
 
         # --- burial fi and exposure ui ---
-        scaled_distance = distance / cavity_radii.view(1, 1, number_of_atoms)
-        switching = self._regularize_switching(scaled_distance)  # [n_a, n_grid, n_b]
-        switching = switching * off_diagonal.view(number_of_atoms, 1, number_of_atoms)
-        burial = switching.sum(dim=2)  # [n_a, n_grid]
+        scaled_distance = distance / cavity_radii.view(number_of_graphs, 1, 1, max_atoms)
+        switching = self._regularize_switching(scaled_distance)  # [n_graphs, a, n_grid, b]
+        switching = switching * valid_pair.view(number_of_graphs, max_atoms, 1, max_atoms)
+        burial = switching.sum(dim=3)  # [n_graphs, a, n_grid]
         burial = torch.where(burial < 1.0e-20, torch.zeros_like(burial), burial)
         exposure = torch.clamp(1.0 - burial, min=0.0)
 
         # --- solute potential on the cavity grid and its harmonic projection phi ---
+        # (padding sources carry charge 0, so summing over all b needs no source mask here.)
         kernel = screened_coulomb_kernel(distance, self.point_effective_width)
         potential = self.coulomb_constant * (
-            charges.view(1, 1, number_of_atoms) * kernel
-        ).sum(dim=2)  # [n_a, n_grid]
-        weighted = self.lebedev_weights.view(1, number_of_grid_points) * exposure * potential
-        right_hand_side = -(weighted @ self.real_spherical_harmonics.t())  # [n_a, number_of_lm]
+            charges.view(number_of_graphs, 1, 1, max_atoms) * kernel
+        ).sum(dim=3)  # [n_graphs, a, n_grid]
+        weighted = (
+            self.lebedev_weights.view(1, 1, number_of_grid_points) * exposure * potential
+        )
+        right_hand_side = -torch.matmul(
+            weighted, self.real_spherical_harmonics.t()
+        )  # [n_graphs, a, number_of_lm]
 
         # --- ddCOSMO matrix L ---
         four_pi_over_two_l_plus_one = self.four_pi_over_two_l_plus_one
         angular_momentum_float = self.lm_angular_momentum.to(positions.dtype)
-        diagonal_values = four_pi_over_two_l_plus_one.view(1, number_of_lm) / cavity_radii.view(
-            number_of_atoms, 1
-        )  # [n_a, number_of_lm]
+        diagonal_values = four_pi_over_two_l_plus_one.view(
+            1, 1, number_of_lm
+        ) / cavity_radii.view(number_of_graphs, max_atoms, 1)  # [n_graphs, a, number_of_lm]
 
-        # Per-target-atom partition weights, then the grid weight for every (target a, source b).
-        partition_weights = self.lebedev_weights.view(1, number_of_grid_points) / torch.clamp(
-            burial, min=1.0
-        )  # [n_a, n_grid]
+        partition_weights = self.lebedev_weights.view(
+            1, 1, number_of_grid_points
+        ) / torch.clamp(burial, min=1.0)  # [n_graphs, a, n_grid]
         grid_weights = switching * partition_weights.view(
-            number_of_atoms, number_of_grid_points, 1
-        )  # [n_a, n_grid, n_b] (off-diagonal already masked via ``switching``)
+            number_of_graphs, max_atoms, number_of_grid_points, 1
+        )  # [n_graphs, a, n_grid, b] (off-diagonal / padding already masked via ``switching``)
 
-        # Source solid harmonics R_lm(cavity_point_a - R_b) for every (a, grid, b): flatten to
-        # reuse the tested [n_points, 3] -> [nlm, n_points] helper, then restore the 4-D layout.
+        # Source solid harmonics R_lm(cavity_point_a - R_b) for every (graph, a, grid, b): flatten
+        # to reuse the tested [n_points, 3] -> [nlm, n_points] helper, then restore the layout.
         source_solid_harmonics = self._solid_harmonics(displacement.reshape(-1, 3)).reshape(
-            number_of_lm, number_of_atoms, number_of_grid_points, number_of_atoms
-        )  # [nlm_source, n_a, n_grid, n_b]
+            number_of_lm, number_of_graphs, max_atoms, number_of_grid_points, max_atoms
+        )  # [nlm_source, n_graphs, a, n_grid, b]
         weighted_source = source_solid_harmonics * grid_weights.view(
-            1, number_of_atoms, number_of_grid_points, number_of_atoms
-        )  # [nlm_source, n_a, n_grid, n_b]
-        # coupling[a, b, t, s] = sum_grid real_sph[t, grid] * weighted_source[s, a, grid, b]
-        weighted_source = weighted_source.permute(1, 3, 0, 2)  # [n_a, n_b, nlm_source, n_grid]
+            1, number_of_graphs, max_atoms, number_of_grid_points, max_atoms
+        )
+        # coupling[g, a, b, t, s] = sum_grid real_sph[t, grid] * weighted_source[s, g, a, grid, b]
+        weighted_source = weighted_source.permute(
+            1, 2, 4, 0, 3
+        )  # [n_graphs, a, b, nlm_source, n_grid]
         coupling = torch.matmul(
-            self.real_spherical_harmonics.view(1, 1, number_of_lm, number_of_grid_points),
+            self.real_spherical_harmonics.view(1, 1, 1, number_of_lm, number_of_grid_points),
             weighted_source.transpose(-1, -2),
-        )  # [n_a, n_b, nlm_target, nlm_source]
+        )  # [n_graphs, a, b, nlm_target, nlm_source]
 
-        source_factor = four_pi_over_two_l_plus_one.view(1, number_of_lm) / cavity_radii.view(
-            number_of_atoms, 1
-        ) ** (angular_momentum_float.view(1, number_of_lm) + 1.0)  # [n_b, nlm_source]
-        blocks = -source_factor.view(1, number_of_atoms, 1, number_of_lm) * coupling
-        # place block (a, b) at rows a*nlm.., cols b*nlm.. ; self blocks are already zero.
-        neighbour_matrix = blocks.permute(0, 2, 1, 3).reshape(
-            number_of_atoms * number_of_lm, number_of_atoms * number_of_lm
+        source_factor = four_pi_over_two_l_plus_one.view(
+            1, 1, number_of_lm
+        ) / cavity_radii.view(number_of_graphs, max_atoms, 1) ** (
+            angular_momentum_float.view(1, 1, number_of_lm) + 1.0
+        )  # [n_graphs, b, nlm_source]
+        blocks = -source_factor.view(number_of_graphs, 1, max_atoms, 1, number_of_lm) * coupling
+        # place block (a, b) at rows a*nlm.., cols b*nlm.. ; self / padding blocks are zero.
+        neighbour_matrix = blocks.permute(0, 1, 3, 2, 4).reshape(
+            number_of_graphs, max_atoms * number_of_lm, max_atoms * number_of_lm
         )
 
-        matrix_dimension = number_of_atoms * number_of_lm
+        matrix_dimension = max_atoms * number_of_lm
+        identity = torch.eye(
+            matrix_dimension, dtype=positions.dtype, device=positions.device
+        ).view(1, matrix_dimension, matrix_dimension)
         cosmo_matrix = (
             neighbour_matrix
-            + torch.diag(diagonal_values.reshape(-1))
-            + self.solve_ridge
-            * torch.eye(matrix_dimension, dtype=positions.dtype, device=positions.device)
+            + torch.diag_embed(diagonal_values.reshape(number_of_graphs, matrix_dimension))
+            + self.solve_ridge * identity
         )
 
         surface_coefficients = torch.linalg.solve(
-            cosmo_matrix, right_hand_side.reshape(-1)
-        ).reshape(number_of_atoms, number_of_lm)
+            cosmo_matrix, right_hand_side.reshape(number_of_graphs, matrix_dimension, 1)
+        ).reshape(number_of_graphs, max_atoms, number_of_lm)
 
-        # --- monopole source projection psi and the energy contraction ---
+        # --- monopole source projection psi and the energy contraction (padding psi == 0) ---
         source_projection = torch.zeros(
-            number_of_atoms, number_of_lm, dtype=positions.dtype, device=positions.device
+            number_of_graphs,
+            max_atoms,
+            number_of_lm,
+            dtype=positions.dtype,
+            device=positions.device,
         )
-        source_projection[:, 0] = self.sqrt_four_pi * charges / cavity_radii
-        return 0.5 * (source_projection * surface_coefficients).sum()
+        source_projection[:, :, 0] = self.sqrt_four_pi * charges / cavity_radii
+        energy = 0.5 * (source_projection * surface_coefficients).reshape(
+            number_of_graphs, -1
+        ).sum(dim=1)
+        return energy  # [n_graphs]
 
     def forward(
         self,
@@ -350,20 +379,43 @@ class DdcosmoReactionField(torch.nn.Module):
         dielectric_scaling: Tensor,
     ) -> Tensor:
         number_of_graphs = int(dielectric_scaling.shape[0])
+        number_of_atoms = positions.shape[0]
+        if number_of_atoms == 0:
+            return torch.zeros(
+                number_of_graphs, dtype=positions.dtype, device=positions.device
+            )
         cavity_radii = self.cavity_radius_lookup.index_select(0, atomic_numbers)
 
-        energies = torch.zeros(
-            number_of_graphs, dtype=positions.dtype, device=positions.device
+        # Pack the ragged batch into a dense [n_graphs, max_atoms, ...] layout. Assumes the atoms
+        # of each graph are contiguous and in graph order (the standard mace/torch-geometric
+        # batch layout); intra-graph position = global index - graph offset.
+        counts = torch.zeros(number_of_graphs, dtype=torch.long, device=positions.device)
+        counts = counts.scatter_add(
+            0, batch, torch.ones(number_of_atoms, dtype=torch.long, device=positions.device)
         )
-        for graph_index in range(number_of_graphs):
-            atom_indices = torch.nonzero(batch == graph_index).squeeze(-1)
-            if atom_indices.numel() == 0:
-                continue
-            graph_energy = self._graph_reaction_field_energy(
-                positions.index_select(0, atom_indices),
-                charges.index_select(0, atom_indices),
-                cavity_radii.index_select(0, atom_indices),
-            )
-            energies[graph_index] = graph_energy
+        max_atoms = int(counts.max())
+        offsets = torch.cumsum(counts, dim=0) - counts  # exclusive prefix sum, [n_graphs]
+        intra_index = torch.arange(
+            number_of_atoms, device=positions.device
+        ) - offsets.index_select(0, batch)
+        linear_index = batch * max_atoms + intra_index  # [n_atoms] -> slot in the padded layout
 
+        padded_size = number_of_graphs * max_atoms
+        padded_positions = torch.zeros(
+            padded_size, 3, dtype=positions.dtype, device=positions.device
+        ).index_copy(0, linear_index, positions).view(number_of_graphs, max_atoms, 3)
+        padded_charges = torch.zeros(
+            padded_size, dtype=positions.dtype, device=positions.device
+        ).index_copy(0, linear_index, charges).view(number_of_graphs, max_atoms)
+        # Padding radius 1 (not 0) keeps 1/r and r**l finite; padding entries are masked out.
+        padded_radii = torch.ones(
+            padded_size, dtype=positions.dtype, device=positions.device
+        ).index_copy(0, linear_index, cavity_radii).view(number_of_graphs, max_atoms)
+        atom_valid = torch.arange(
+            max_atoms, device=positions.device
+        ).view(1, max_atoms) < counts.view(number_of_graphs, 1)  # [n_graphs, max_atoms]
+
+        energies = self._batched_reaction_field_energy(
+            padded_positions, padded_charges, padded_radii, atom_valid
+        )
         return energies * dielectric_scaling
