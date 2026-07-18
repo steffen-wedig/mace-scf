@@ -237,7 +237,13 @@ class DdcosmoReactionField(torch.nn.Module):
         charges: Tensor,
         cavity_radii: Tensor,
     ) -> Tensor:
-        """f(eps)-independent ddCOSMO energy ``0.5 * <psi, L^{-1} phi>`` for one molecule."""
+        """f(eps)-independent ddCOSMO energy ``0.5 * <psi, L^{-1} phi>`` for one molecule.
+
+        Fully vectorised over atom pairs. The earlier per-atom Python double loops (burial and
+        the neighbour-coupling matrix build) were the ddCOSMO bottleneck: each of their O(n^2)
+        iterations launched several tiny GPU kernels and grew the autograd graph. This form does
+        the same arithmetic with batched tensor ops, so it is identical up to floating point.
+        """
         number_of_atoms = positions.shape[0]
         number_of_grid_points = self.number_of_grid_points
         number_of_lm = self.number_of_lm
@@ -249,75 +255,79 @@ class DdcosmoReactionField(torch.nn.Module):
             + positions.view(number_of_atoms, 1, 3)
         )
 
+        # Every cavity point of atom a relative to every atom b: [n_a, n_grid, n_b, 3]. Reused
+        # for the burial, the solute potential, and the neighbour solid harmonics.
+        displacement = cavity_points.unsqueeze(2) - positions.view(1, 1, number_of_atoms, 3)
+        distance = torch.linalg.norm(displacement, dim=3)  # [n_a, n_grid, n_b]
+
+        # Off-diagonal mask reproduces the pair loops' ``b != a`` skip exactly. (A point on atom
+        # a's own sphere sits at distance == r_vdw[a], which the switching function already sends
+        # to ~0, but masking makes the self term exactly zero as the explicit ``continue`` did.)
+        off_diagonal = 1.0 - torch.eye(
+            number_of_atoms, dtype=positions.dtype, device=positions.device
+        )  # [n_a, n_b]
+
         # --- burial fi and exposure ui ---
-        burial = torch.zeros(
-            number_of_atoms, number_of_grid_points, dtype=positions.dtype, device=positions.device
-        )
-        for atom_index in range(number_of_atoms):
-            for neighbour_index in range(number_of_atoms):
-                if neighbour_index == atom_index:
-                    continue
-                relative = cavity_points[atom_index] - positions[neighbour_index]
-                scaled_distance = (
-                    torch.linalg.norm(relative, dim=1) / cavity_radii[neighbour_index]
-                )
-                burial[atom_index] = burial[atom_index] + self._regularize_switching(
-                    scaled_distance
-                )
+        scaled_distance = distance / cavity_radii.view(1, 1, number_of_atoms)
+        switching = self._regularize_switching(scaled_distance)  # [n_a, n_grid, n_b]
+        switching = switching * off_diagonal.view(number_of_atoms, 1, number_of_atoms)
+        burial = switching.sum(dim=2)  # [n_a, n_grid]
         burial = torch.where(burial < 1.0e-20, torch.zeros_like(burial), burial)
         exposure = torch.clamp(1.0 - burial, min=0.0)
 
         # --- solute potential on the cavity grid and its harmonic projection phi ---
-        displacement = cavity_points.unsqueeze(2) - positions.view(1, 1, number_of_atoms, 3)
-        distance = torch.linalg.norm(displacement, dim=3)  # [n_atoms, n_grid, n_atoms]
         kernel = screened_coulomb_kernel(distance, self.point_effective_width)
         potential = self.coulomb_constant * (
             charges.view(1, 1, number_of_atoms) * kernel
-        ).sum(dim=2)  # [n_atoms, n_grid]
+        ).sum(dim=2)  # [n_a, n_grid]
         weighted = self.lebedev_weights.view(1, number_of_grid_points) * exposure * potential
-        right_hand_side = -(weighted @ self.real_spherical_harmonics.t())  # [n_atoms, number_of_lm]
+        right_hand_side = -(weighted @ self.real_spherical_harmonics.t())  # [n_a, number_of_lm]
 
         # --- ddCOSMO matrix L ---
         four_pi_over_two_l_plus_one = self.four_pi_over_two_l_plus_one
         angular_momentum_float = self.lm_angular_momentum.to(positions.dtype)
         diagonal_values = four_pi_over_two_l_plus_one.view(1, number_of_lm) / cavity_radii.view(
             number_of_atoms, 1
-        )  # [n_atoms, number_of_lm]
-        cosmo_matrix = torch.diag(diagonal_values.reshape(-1))  # [n_atoms*nlm, n_atoms*nlm]
+        )  # [n_a, number_of_lm]
 
-        for atom_index in range(number_of_atoms):
-            partition_weights = self.lebedev_weights / torch.clamp(burial[atom_index], min=1.0)
-            for source_index in range(number_of_atoms):
-                if source_index == atom_index:
-                    continue
-                relative = cavity_points[atom_index] - positions[source_index]  # [n_grid, 3]
-                scaled_distance = torch.linalg.norm(relative, dim=1) / cavity_radii[source_index]
-                grid_weights = self._regularize_switching(scaled_distance) * partition_weights
-                solid_harmonics = self._solid_harmonics(relative)  # [number_of_lm, n_grid]
-                source_factor = four_pi_over_two_l_plus_one / cavity_radii[source_index] ** (
-                    angular_momentum_float + 1.0
-                )  # [number_of_lm]
-                coupling = (
-                    self.real_spherical_harmonics * grid_weights.view(1, number_of_grid_points)
-                ) @ solid_harmonics.t()  # [number_of_lm, number_of_lm]
-                block = -source_factor.view(1, number_of_lm) * coupling
-                row_start = atom_index * number_of_lm
-                source_start = source_index * number_of_lm
-                cosmo_matrix[
-                    row_start : row_start + number_of_lm,
-                    source_start : source_start + number_of_lm,
-                ] = (
-                    cosmo_matrix[
-                        row_start : row_start + number_of_lm,
-                        source_start : source_start + number_of_lm,
-                    ]
-                    + block
-                )
+        # Per-target-atom partition weights, then the grid weight for every (target a, source b).
+        partition_weights = self.lebedev_weights.view(1, number_of_grid_points) / torch.clamp(
+            burial, min=1.0
+        )  # [n_a, n_grid]
+        grid_weights = switching * partition_weights.view(
+            number_of_atoms, number_of_grid_points, 1
+        )  # [n_a, n_grid, n_b] (off-diagonal already masked via ``switching``)
 
-        # small ridge guards a near-singular cavity before the direct solve
+        # Source solid harmonics R_lm(cavity_point_a - R_b) for every (a, grid, b): flatten to
+        # reuse the tested [n_points, 3] -> [nlm, n_points] helper, then restore the 4-D layout.
+        source_solid_harmonics = self._solid_harmonics(displacement.reshape(-1, 3)).reshape(
+            number_of_lm, number_of_atoms, number_of_grid_points, number_of_atoms
+        )  # [nlm_source, n_a, n_grid, n_b]
+        weighted_source = source_solid_harmonics * grid_weights.view(
+            1, number_of_atoms, number_of_grid_points, number_of_atoms
+        )  # [nlm_source, n_a, n_grid, n_b]
+        # coupling[a, b, t, s] = sum_grid real_sph[t, grid] * weighted_source[s, a, grid, b]
+        weighted_source = weighted_source.permute(1, 3, 0, 2)  # [n_a, n_b, nlm_source, n_grid]
+        coupling = torch.matmul(
+            self.real_spherical_harmonics.view(1, 1, number_of_lm, number_of_grid_points),
+            weighted_source.transpose(-1, -2),
+        )  # [n_a, n_b, nlm_target, nlm_source]
+
+        source_factor = four_pi_over_two_l_plus_one.view(1, number_of_lm) / cavity_radii.view(
+            number_of_atoms, 1
+        ) ** (angular_momentum_float.view(1, number_of_lm) + 1.0)  # [n_b, nlm_source]
+        blocks = -source_factor.view(1, number_of_atoms, 1, number_of_lm) * coupling
+        # place block (a, b) at rows a*nlm.., cols b*nlm.. ; self blocks are already zero.
+        neighbour_matrix = blocks.permute(0, 2, 1, 3).reshape(
+            number_of_atoms * number_of_lm, number_of_atoms * number_of_lm
+        )
+
         matrix_dimension = number_of_atoms * number_of_lm
-        cosmo_matrix = cosmo_matrix + self.solve_ridge * torch.eye(
-            matrix_dimension, dtype=positions.dtype, device=positions.device
+        cosmo_matrix = (
+            neighbour_matrix
+            + torch.diag(diagonal_values.reshape(-1))
+            + self.solve_ridge
+            * torch.eye(matrix_dimension, dtype=positions.dtype, device=positions.device)
         )
 
         surface_coefficients = torch.linalg.solve(
