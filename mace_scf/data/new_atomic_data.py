@@ -89,6 +89,12 @@ class ExtAtomicData(AtomicData):
         cluster_loss_weight = kwargs.pop("cluster_loss_weight", None)
         enegs = kwargs.pop("enegs", None)
         hardness = kwargs.pop("hardness", None)
+        # base mace's MagneticMACE (PR #1244) made these required positional
+        # arguments of AtomicData.__init__; this extension carries no magnetic
+        # data, and the base class accepts None for all three.
+        kwargs.setdefault("magforces_weight", None)
+        kwargs.setdefault("magmom", None)
+        kwargs.setdefault("magforces", None)
         super().__init__(**kwargs)
         assert (
             density_coefficients_weight is None
