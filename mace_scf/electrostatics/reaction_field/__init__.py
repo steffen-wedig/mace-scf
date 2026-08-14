@@ -26,12 +26,25 @@ from .constants import (
     dielectric_scaling,
 )
 from .ddcosmo import DdcosmoReactionField
+from .ddcosmo_provider import DdcosmoReactionFieldProvider
+from .generalized_kirkwood import (
+    GENERALIZED_KIRKWOOD_GAUSSIAN_CONSTANT,
+    GeneralizedKirkwoodReactionField,
+)
+from .reaction_potential import (
+    GeneralizedBornReactionField,
+    ReactionFieldProvider,
+    reaction_free_energy,
+)
 from .screened_born import ScreenedGeneralizedBornSolvation
 from .screened_potential import (
     COULOMB_CONSTANT_EV_ANGSTROM,
     build_cavity_radius_lookup,
+    compute_obc_born_radii,
     dielectric_scaling_from_dielectric_constant,
+    generalized_born_descreening_factor,
     generalized_born_effective_distance,
+    kirkwood_dielectric_factor,
     screened_coulomb_kernel,
     screened_gaussian_potential_at_points,
 )
@@ -39,13 +52,22 @@ from .screened_potential import (
 __all__ = [
     "ScreenedGeneralizedBornSolvation",
     "DdcosmoReactionField",
+    "DdcosmoReactionFieldProvider",
+    "ReactionFieldProvider",
+    "GeneralizedBornReactionField",
+    "GeneralizedKirkwoodReactionField",
+    "GENERALIZED_KIRKWOOD_GAUSSIAN_CONSTANT",
+    "reaction_free_energy",
     "dielectric_scaling",
     "dielectric_scaling_from_dielectric_constant",
+    "kirkwood_dielectric_factor",
     "cavity_radius_angstrom",
     "build_cavity_radius_lookup",
+    "compute_obc_born_radii",
     "screened_coulomb_kernel",
     "screened_gaussian_potential_at_points",
     "generalized_born_effective_distance",
+    "generalized_born_descreening_factor",
     "COULOMB_CONSTANT_EV_ANGSTROM",
     "CAVITY_LEBEDEV_ORDER",
     "HARTREE_IN_ELECTRON_VOLT",

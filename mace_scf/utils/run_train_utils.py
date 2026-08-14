@@ -262,6 +262,43 @@ def build_model(
             fixedpoint_update_config=None,
             field_readout_config=None,
         )
+    elif args.model == "SolvatedPolarMACE":
+        # PolarMACE + a self-consistent continuum reaction field injected into its recursion
+        # loop (mace_scf.electrostatics.solvated_polar_mace). The reaction potential (l=0) and
+        # field (l=1) come from a swappable provider selected by --reaction_field_scheme
+        # (generalized_born | generalized_kirkwood); field_feature_max_l >= 1 is required so the
+        # l=1 field channel exists. All the base-PolarMACE field args are passed as above.
+        mean, std = mace.modules.scaling_classes[args.scaling](
+            train_loader, atomic_energies
+        )
+        model = electrostatics.SolvatedPolarMACE(
+            **model_config,
+            interaction_cls_first=mace.modules.interaction_classes[
+                args.interaction_first
+            ],
+            atomic_inter_scale=std,
+            atomic_inter_shift=mean,
+            kspace_cutoff_factor=args.kspace_cutoff_factor,
+            atomic_multipoles_max_l=args.atomic_multipoles_max_l,
+            atomic_multipoles_smearing_width=args.atomic_multipoles_smearing_width,
+            field_feature_max_l=args.field_feature_max_l,
+            field_feature_widths=ast.literal_eval(args.field_feature_widths),
+            num_recursion_steps=args.num_recursion_steps,
+            field_si=args.include_field_si,
+            include_electrostatic_self_interaction=args.include_electrostatic_self_interaction,
+            add_local_electron_energy=args.include_local_electron_energy,
+            quadrupole_feature_corrections=args.quadrupole_feature_corrections,
+            return_electrostatic_potentials=args.return_electrostatic_potentials,
+            field_norm_factor=args.field_norm_factor,
+            field_feature_norms=None,
+            fixedpoint_update_config=None,
+            field_readout_config=None,
+            reaction_field_scheme=args.reaction_field_scheme,
+            reaction_field_smearing_width=args.reaction_field_smearing_width,
+            generalized_kirkwood_gaussian_constant=args.generalized_kirkwood_gaussian_constant,
+            ddcosmo_lebedev_order=args.ddcosmo_lebedev_order,
+            ddcosmo_max_spherical_harmonic_order=args.ddcosmo_max_spherical_harmonic_order,
+        )
     else:
         raise RuntimeError(f"Unknown model: '{args.model}'")
 
@@ -407,8 +444,10 @@ def get_param_options(model, args):
                 "weight_decay": args.weight_decay,
             }
         )
-    if args.model == "PolarMACE":
-        # Weight-decay assignment mirrors the FixedPoint branch above (the same
+    if args.model in ("PolarMACE", "SolvatedPolarMACE"):
+        # SolvatedPolarMACE subclasses PolarMACE and adds no learnable parameters (its reaction
+        # field provider + projection block are buffer-only), so the exact same parameter groups
+        # cover it. Weight-decay assignment mirrors the FixedPoint branch above (the same
         # model family): charge/multipole sources get local_charges_weight_decay,
         # field-response maps get field_block_weight_decay. All groups use the
         # default learning rate; per-stage overrides are available through the

@@ -33,3 +33,6 @@ wandb/
 results/
 experiments/
 checkpoints/
+
+# uv lock stub for the editable install (resolved by the parent project)
+uv.lock

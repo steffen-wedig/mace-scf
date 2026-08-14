@@ -29,6 +29,7 @@ import torch
 
 # Reuse the vacuum-electrostatics Coulomb constant rather than defining a second one.
 from graph_longrange.utils import FIELD_CONSTANT
+from mace.tools.scatter import scatter_sum
 from torch import Tensor
 
 from .constants import (
@@ -105,6 +106,26 @@ def dielectric_scaling_from_dielectric_constant(dielectric_constant: Tensor) -> 
     return (dielectric_constant - 1.0) / dielectric_constant
 
 
+def kirkwood_dielectric_factor(dielectric_constant: Tensor, multipole_order: int) -> Tensor:
+    """Order-dependent Kirkwood reaction-field dielectric factor ``f_l``.
+
+    ``f_l = (l+1)(eps - 1) / [ (l+1) eps + l ]`` (Kirkwood 1934; traceless-Cartesian form of
+    Corrigan et al. 2023, Eq. 9 with reference permittivity 1). Reduces to the familiar limits:
+
+    * ``l = 0``: ``(eps - 1) / eps`` -- the Born / C-PCM monopole scaling
+      (identical to :func:`dielectric_scaling_from_dielectric_constant`).
+    * ``l = 1``: ``2 (eps - 1) / (2 eps + 1)`` -- the Onsager dipole reaction-field factor.
+
+    Exactly 0 at ``eps == 1`` (gas) for every order, so the reaction field and its gradient
+    vanish for gas-phase records. ``multipole_order`` is a plain int so the function stays
+    TorchScript-scriptable.
+    """
+    order = float(multipole_order)
+    return (order + 1.0) * (dielectric_constant - 1.0) / (
+        (order + 1.0) * dielectric_constant + order
+    )
+
+
 def screened_coulomb_kernel(distance: Tensor, effective_smearing_width: float) -> Tensor:
     """erf-screened reciprocal distance ``erf(0.5 * distance / width) / distance``.
 
@@ -171,15 +192,111 @@ def generalized_born_effective_distance(
     interatomic_distance: Tensor,
     born_radius_sender: Tensor,
     born_radius_receiver: Tensor,
+    gaussian_constant: float = 4.0,
 ) -> Tensor:
-    """Still's generalized-Born effective distance ``f_GB``.
+    """Still's generalized-Born / generalized-Kirkwood effective distance ``f_GB``.
 
-    ``f_GB = sqrt(r**2 + R_i * R_j * exp(-r**2 / (4 * R_i * R_j)))``. For ``r = 0`` (the Born
-    self term) this collapses to ``sqrt(R_i * R_j)``; with equal radii that is the Born radius,
-    giving the usual self-energy ``-0.5 * f(eps) * k * q**2 / R``.
+    ``f_GB = sqrt(r**2 + R_i * R_j * exp(-r**2 / (c * R_i * R_j)))``. For ``r = 0`` (the Born /
+    Kirkwood self term) this collapses to ``sqrt(R_i * R_j)``; with equal radii that is the Born
+    radius, giving the usual self-energy ``-0.5 * f(eps) * k * q**2 / R``.
+
+    ``gaussian_constant`` (``c``) is **4.0** for Still's classic generalized Born (the screened-GB
+    baseline) and **2.455** for the generalized-Kirkwood multipole model (AMOEBA ``gkc``; Corrigan
+    et al. 2023). It is a parameter so the two schemes share one geometry function.
     """
     radius_product = born_radius_sender * born_radius_receiver
     squared_distance = interatomic_distance * interatomic_distance
     return torch.sqrt(
-        squared_distance + radius_product * torch.exp(-squared_distance / (4.0 * radius_product))
+        squared_distance
+        + radius_product * torch.exp(-squared_distance / (gaussian_constant * radius_product))
+    )
+
+
+def generalized_born_descreening_factor(
+    interatomic_distance: Tensor,
+    born_radius_sender: Tensor,
+    born_radius_receiver: Tensor,
+    gaussian_constant: float = 4.0,
+) -> Tensor:
+    """The geometric chain-rule factor ``expc1 = 1 - exp(-r**2/(c R_i R_j)) / c``.
+
+    This is ``0.5 * d(f_GB**2)/d(r**2)`` (Corrigan et al. 2023, Eq. 5): differentiating the
+    effective distance w.r.t. atom positions produces ``d f_GB / d r_alpha = expc1 * r_alpha /
+    f_GB``. It is purely geometric (independent of the kernel screening) and appears in every
+    position-derivative of the reaction field -- i.e. in the charge-dipole and dipole-dipole
+    Kirkwood tensors.
+    """
+    radius_product = born_radius_sender * born_radius_receiver
+    squared_distance = interatomic_distance * interatomic_distance
+    return 1.0 - torch.exp(-squared_distance / (gaussian_constant * radius_product)) / (
+        gaussian_constant
+    )
+
+
+def compute_obc_born_radii(
+    positions: Tensor,
+    atomic_numbers: Tensor,
+    batch: Tensor,
+    cavity_radius_lookup: Tensor,
+    born_scale: float = 0.8,
+    obc_alpha: float = 1.0,
+    obc_beta: float = 0.8,
+    obc_gamma: float = 4.85,
+    offset_radius_angstrom: float = 0.09,
+    born_radius_min_angstrom: float = 0.1,
+    born_radius_max_angstrom: float = 30.0,
+) -> Tensor:
+    """OBC-II effective Born radii per atom, ``[n_atoms]`` (Angstrom), block-isolated.
+
+    Hawkins-Cramer-Truhlar pairwise descreening integral over same-molecule neighbours plus the
+    Onufriev-Bashford-Case (OBC-II) tanh rescaling, clamped to ``[min, max]``. Single source of
+    the Born-radius recipe shared by the screened-GB scaffold and the generalized-Kirkwood
+    provider. ``cavity_radius_lookup`` is the per-atomic-number intrinsic radius buffer from
+    :func:`build_cavity_radius_lookup`.
+    """
+    intrinsic_radius = cavity_radius_lookup.index_select(0, atomic_numbers)
+    offset_radius = intrinsic_radius - offset_radius_angstrom
+
+    edge_index = build_intramolecular_pairs(batch)
+    sender = edge_index[0]
+    receiver = edge_index[1]
+
+    number_of_atoms = positions.shape[0]
+    if sender.numel() == 0:
+        descreening_integral = torch.zeros(
+            number_of_atoms, dtype=positions.dtype, device=positions.device
+        )
+    else:
+        displacement = positions.index_select(0, receiver) - positions.index_select(0, sender)
+        distance = torch.linalg.norm(displacement, dim=1)
+        offset_radius_receiver = offset_radius.index_select(0, receiver)
+        scaled_radius_sender = born_scale * offset_radius.index_select(0, sender)
+
+        upper = distance + scaled_radius_sender
+        difference = torch.abs(distance - scaled_radius_sender)
+        lower = torch.maximum(offset_radius_receiver, difference)
+        gate = (upper > offset_radius_receiver).to(positions.dtype)
+
+        inverse_lower = 1.0 / lower
+        inverse_upper = 1.0 / upper
+        edge_term = gate * 0.5 * (
+            inverse_lower
+            - inverse_upper
+            + 0.25
+            * (distance - scaled_radius_sender * scaled_radius_sender / distance)
+            * (inverse_upper * inverse_upper - inverse_lower * inverse_lower)
+            + 0.5 * torch.log(lower / upper) / distance
+        )
+        descreening_integral = scatter_sum(
+            src=edge_term, index=receiver, dim=0, dim_size=number_of_atoms
+        )
+
+    psi = descreening_integral * offset_radius
+    tanh_argument = (
+        obc_alpha * psi - obc_beta * psi * psi + obc_gamma * psi * psi * psi
+    )
+    inverse_born_radius = 1.0 / offset_radius - torch.tanh(tanh_argument) / intrinsic_radius
+    born_radius = 1.0 / inverse_born_radius
+    return torch.clamp(
+        born_radius, min=born_radius_min_angstrom, max=born_radius_max_angstrom
     )

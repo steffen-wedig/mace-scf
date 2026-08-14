@@ -365,16 +365,17 @@ class DdcosmoReactionField(torch.nn.Module):
         source_solid_harmonics = self._solid_harmonics(displacement.reshape(-1, 3)).reshape(
             number_of_lm, number_of_graphs, max_atoms, number_of_grid_points, max_atoms
         )  # [nlm_source, n_graphs, a, n_grid, b]
-        weighted_source = source_solid_harmonics * grid_weights.view(
-            1, number_of_graphs, max_atoms, number_of_grid_points, max_atoms
-        )
-        # coupling[g, a, b, t, s] = sum_grid real_sph[t, grid] * weighted_source[s, g, a, grid, b]
-        weighted_source = weighted_source.permute(
-            1, 2, 4, 0, 3
-        )  # [n_graphs, a, b, nlm_source, n_grid]
-        coupling = torch.matmul(
-            self.real_spherical_harmonics.view(1, 1, 1, number_of_lm, number_of_grid_points),
-            weighted_source.transpose(-1, -2),
+        # coupling[g, a, b, t, s] = sum_grid real_sph[t, grid] * grid_weights[g, a, grid, b]
+        #                                   * source_solid_harmonics[s, g, a, grid, b]
+        # A single fused einsum (opt_einsum path) rather than an explicit weighted-source
+        # multiply + permute + transpose + matmul: avoids materialising ~3 full copies of the big
+        # [nlm, g, a, grid, b] tensor (and their stored-for-autograd duplicates), cutting peak
+        # memory. Numerically identical to the matmul form.
+        coupling = torch.einsum(
+            "tG,gaGb,sgaGb->gabts",
+            self.real_spherical_harmonics,
+            grid_weights,
+            source_solid_harmonics,
         )  # [n_graphs, a, b, nlm_target, nlm_source]
 
         source_factor = four_pi_over_two_l_plus_one.view(

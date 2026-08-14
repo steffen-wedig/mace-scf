@@ -36,6 +36,7 @@ from .screened_potential import (
     COULOMB_CONSTANT_EV_ANGSTROM,
     build_cavity_radius_lookup,
     build_intramolecular_pairs,
+    compute_obc_born_radii,
     generalized_born_effective_distance,
     screened_coulomb_kernel,
 )
@@ -102,63 +103,23 @@ class ScreenedGeneralizedBornSolvation(torch.nn.Module):
     ) -> Tensor:
         """OBC-II effective Born radii per atom, ``[n_atoms]`` (Angstrom), block-isolated.
 
-        Uses the HCT pairwise descreening integral over same-molecule neighbours and the OBC
-        tanh rescaling, then clamps to ``[born_radius_min, born_radius_max]``.
+        Delegates to :func:`reaction_field.screened_potential.compute_obc_born_radii` (the single
+        source of the HCT descreening + OBC tanh rescaling recipe, shared with the
+        generalized-Kirkwood provider).
         """
-        intrinsic_radius = self.cavity_radius_lookup.index_select(0, atomic_numbers)
-        offset_radius = intrinsic_radius - self.offset_radius_angstrom
-
-        edge_index = build_intramolecular_pairs(batch)
-        sender = edge_index[0]
-        receiver = edge_index[1]
-
-        number_of_atoms = positions.shape[0]
-        if sender.numel() == 0:
-            # No neighbours (isolated atoms): integral is zero, Born radius == offset radius.
-            descreening_integral = torch.zeros(
-                number_of_atoms, dtype=positions.dtype, device=positions.device
-            )
-        else:
-            displacement = positions.index_select(0, receiver) - positions.index_select(0, sender)
-            distance = torch.linalg.norm(displacement, dim=1)  # [n_edges]
-            offset_radius_receiver = offset_radius.index_select(0, receiver)
-            scaled_radius_sender = self.born_scale * offset_radius.index_select(0, sender)
-
-            upper = distance + scaled_radius_sender
-            difference = torch.abs(distance - scaled_radius_sender)
-            lower = torch.maximum(offset_radius_receiver, difference)
-            # Only contributes when the descreening sphere reaches into atom i's region.
-            gate = (upper > offset_radius_receiver).to(positions.dtype)
-
-            inverse_lower = 1.0 / lower
-            inverse_upper = 1.0 / upper
-            edge_term = gate * 0.5 * (
-                inverse_lower
-                - inverse_upper
-                + 0.25
-                * (distance - scaled_radius_sender * scaled_radius_sender / distance)
-                * (inverse_upper * inverse_upper - inverse_lower * inverse_lower)
-                + 0.5 * torch.log(lower / upper) / distance
-            )
-            descreening_integral = scatter_sum(
-                src=edge_term, index=receiver, dim=0, dim_size=number_of_atoms
-            )
-
-        psi = descreening_integral * offset_radius
-        tanh_argument = (
-            self.obc_alpha * psi
-            - self.obc_beta * psi * psi
-            + self.obc_gamma * psi * psi * psi
+        return compute_obc_born_radii(
+            positions=positions,
+            atomic_numbers=atomic_numbers,
+            batch=batch,
+            cavity_radius_lookup=self.cavity_radius_lookup,  # ty: ignore[invalid-argument-type]
+            born_scale=self.born_scale,
+            obc_alpha=self.obc_alpha,
+            obc_beta=self.obc_beta,
+            obc_gamma=self.obc_gamma,
+            offset_radius_angstrom=self.offset_radius_angstrom,
+            born_radius_min_angstrom=self.born_radius_min_angstrom,
+            born_radius_max_angstrom=self.born_radius_max_angstrom,
         )
-        inverse_born_radius = 1.0 / offset_radius - torch.tanh(tanh_argument) / intrinsic_radius
-        # inverse_born_radius can go <= 0 (huge / negative Born radii): clamp on the radius.
-        born_radius = 1.0 / inverse_born_radius
-        born_radius = torch.clamp(
-            born_radius,
-            min=self.born_radius_min_angstrom,
-            max=self.born_radius_max_angstrom,
-        )
-        return born_radius
 
     def forward(
         self,

@@ -83,6 +83,21 @@ def build_tiny_polar_mace() -> torch.nn.Module:
     )
 
 
+def build_tiny_solvated_polar_mace() -> torch.nn.Module:
+    return mace_scf.electrostatics.SolvatedPolarMACE(
+        **backbone_config(),
+        atomic_inter_scale=1.0,
+        atomic_inter_shift=0.0,
+        kspace_cutoff_factor=1.5,
+        atomic_multipoles_max_l=1,
+        atomic_multipoles_smearing_width=1.5,
+        field_feature_max_l=1,
+        field_feature_widths=[1.5],
+        num_recursion_steps=2,
+        reaction_field_scheme="generalized_kirkwood",
+    )
+
+
 def assert_full_parameter_coverage(model: torch.nn.Module, args: argparse.Namespace):
     param_options = get_param_options(model, args)
 
@@ -115,6 +130,22 @@ def test_polar_mace_param_options_cover_all_parameters():
         pytest.skip("PolarMACE requires mace-torch >= 0.3.16")
     model = build_tiny_polar_mace()
     param_options = assert_full_parameter_coverage(model, minimal_args("PolarMACE"))
+    group_names = {group["name"] for group in param_options["params"]}
+    assert {
+        "lr_source_maps",
+        "fukui_source_map",
+        "field_dependent_charges_maps",
+        "layer_feature_mixer",
+    } <= group_names
+
+
+def test_solvated_polar_mace_param_options_cover_all_parameters():
+    if not hasattr(mace.modules, "PolarMACE"):
+        pytest.skip("SolvatedPolarMACE requires mace-torch >= 0.3.16 (PolarMACE base)")
+    model = build_tiny_solvated_polar_mace()
+    param_options = assert_full_parameter_coverage(
+        model, minimal_args("SolvatedPolarMACE")
+    )
     group_names = {group["name"] for group in param_options["params"]}
     assert {
         "lr_source_maps",

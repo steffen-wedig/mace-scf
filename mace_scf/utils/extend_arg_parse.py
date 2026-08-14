@@ -103,8 +103,16 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         "--reaction_field_scheme",
         type=str,
         default="ddcosmo",
-        choices=["ddcosmo", "screened_gb"],
-        help="Continuum scheme: 'ddcosmo' (production) or 'screened_gb' (Exp-4 baseline).",
+        choices=["ddcosmo", "screened_gb", "generalized_born", "generalized_kirkwood"],
+        help="Continuum scheme. LocalSplitCharges: 'ddcosmo' (production) or 'screened_gb' "
+        "(Exp-4 baseline). SolvatedPolarMACE: 'generalized_born' (monopole baseline) or "
+        "'generalized_kirkwood' (charge + atomic dipole, polarizable).",
+    )
+    parser.add_argument(
+        "--generalized_kirkwood_gaussian_constant",
+        type=float,
+        default=2.455,
+        help="AMOEBA generalized-Kirkwood Gaussian constant gkc (SolvatedPolarMACE, GK scheme).",
     )
     parser.add_argument(
         "--solvent_conditioning",
@@ -344,6 +352,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
             "FixedChargeBaselinedMACE",
             "MACEQEq", #added model for qeq
             "PolarMACE",  # mace-torch >=0.3.16 polarizable long-range model
+            "SolvatedPolarMACE",  # PolarMACE + in-loop continuum reaction field
         ],
         type=str,
         default="MACE",
