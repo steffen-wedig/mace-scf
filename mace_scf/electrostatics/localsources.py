@@ -382,6 +382,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
         compute_virials: bool = False,
         compute_stress: bool = False,
         compute_displacement: bool = False,
+        compute_hessian: bool = False,
         external_field: Optional[torch.Tensor] = None,
     ) -> Dict[str, Optional[torch.Tensor]]:
         node_heads = (
@@ -562,7 +563,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
             cart_polarizability = None
 
         # Outputs
-        forces, virials, stress, _, _ = get_outputs(
+        forces, virials, stress, hessian, _ = get_outputs(
             energy=total_energy,
             positions=data["positions"],
             displacement=displacement,
@@ -571,6 +572,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
             compute_force=compute_force,
             compute_virials=compute_virials,
             compute_stress=compute_stress,
+            compute_hessian=compute_hessian,
         )
 
         return {
@@ -580,6 +582,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
             "forces": forces,
             "virials": virials,
             "stress": stress,
+            "hessian": hessian,
             "displacement": displacement,
             "density_coefficients": charge_density,
             "external_field": external_field,
@@ -675,6 +678,7 @@ class LocalCharges(_LocalSourceModelBase):
         compute_virials: bool = False,
         compute_stress: bool = False,
         compute_displacement: bool = False,
+        compute_hessian: bool = False,
         external_field: Optional[torch.Tensor] = None,
     ) -> Dict[str, Optional[torch.Tensor]]:
         node_heads = (
@@ -806,7 +810,7 @@ class LocalCharges(_LocalSourceModelBase):
         )
 
         # Outputs
-        forces, virials, stress, _, _ = get_outputs(
+        forces, virials, stress, hessian, _ = get_outputs(
             energy=total_energy,
             positions=data["positions"],
             displacement=displacement,
@@ -815,6 +819,7 @@ class LocalCharges(_LocalSourceModelBase):
             compute_force=compute_force,
             compute_virials=compute_virials,
             compute_stress=compute_stress,
+            compute_hessian=compute_hessian,
         )
 
         return {
@@ -824,6 +829,7 @@ class LocalCharges(_LocalSourceModelBase):
             "forces": forces,
             "virials": virials,
             "stress": stress,
+            "hessian": hessian,
             "displacement": displacement,
             "density_coefficients": charge_density,
             "dipole": total_dipole,
@@ -913,6 +919,7 @@ class FixedChargeBaselinedMACE(_LocalSourceModelBase):
         compute_virials: bool = False,
         compute_stress: bool = False,
         compute_displacement: bool = False,
+        compute_hessian: bool = False,
         external_field: Optional[torch.Tensor] = None,
     ) -> Dict[str, Optional[torch.Tensor]]:
         node_heads = (
@@ -1038,7 +1045,7 @@ class FixedChargeBaselinedMACE(_LocalSourceModelBase):
         )
 
         # Outputs
-        forces, virials, stress, _, _ = get_outputs(
+        forces, virials, stress, hessian, _ = get_outputs(
             energy=total_energy,
             positions=data["positions"],
             displacement=displacement,
@@ -1047,6 +1054,7 @@ class FixedChargeBaselinedMACE(_LocalSourceModelBase):
             compute_force=compute_force,
             compute_virials=compute_virials,
             compute_stress=compute_stress,
+            compute_hessian=compute_hessian,
         )
 
         return {
@@ -1056,6 +1064,7 @@ class FixedChargeBaselinedMACE(_LocalSourceModelBase):
             "forces": forces,
             "virials": virials,
             "stress": stress,
+            "hessian": hessian,
             "displacement": displacement,
             "density_coefficients": charge_density,
             "external_field": external_field,
