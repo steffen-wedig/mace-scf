@@ -204,6 +204,32 @@ class _MACELocalSourceCalculator(Calculator):
                 f"Compiled local-source calculator does not support: {names}"
             )
 
+    def get_hessian(self, atoms=None):
+        """Analytic Hessian of the model energy, shape (3 * atoms, atoms, 3).
+
+        Same layout and calling convention as base MACECalculator.get_hessian:
+        one row per differentiated force component, i.e. d2E/dx dx. Not part of
+        implemented_properties on purpose -- ASE's caching protocol does not know
+        second derivatives, so this is a direct method, computed on demand.
+        """
+        if atoms is None and self.atoms is None:
+            raise ValueError("atoms not set")
+        if atoms is None:
+            atoms = self.atoms
+        if self.compiled_evaluator is not None:
+            raise PropertyNotImplementedError(
+                "Compiled local-source calculator does not support: hessian"
+            )
+        data_loader = self._build_data_loader(atoms)
+        batch = next(iter(data_loader)).to(self.device)
+        output = self.model(
+            batch.to_dict(),
+            compute_force=True,
+            compute_hessian=True,
+        )
+        hessian = output["hessian"].detach().cpu().numpy()
+        return hessian * (self.energy_units_to_eV / self.length_units_to_A**2)
+
     def calculate(
         self,
         atoms=None,
