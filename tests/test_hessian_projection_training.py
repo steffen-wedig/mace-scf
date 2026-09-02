@@ -125,6 +125,78 @@ def _forward(model, batch, compute_hessian=False):
     return output
 
 
+def _analytic_hessian(model, batch, atom_count) -> np.ndarray:
+    output = _forward(model, batch, compute_hessian=True)
+    return (
+        output["hessian"]
+        .detach()
+        .reshape(3 * atom_count, 3 * atom_count)
+        .numpy()
+        .copy()
+    )
+
+
+def _exact_intermolecular_error(analytic, reference, assignment) -> float:
+    error = analytic - reference
+    coordinate_assignment = np.repeat(assignment, 3)
+    total = float((error**2).sum())
+    for molecule in np.unique(assignment):
+        mask = coordinate_assignment == molecule
+        total -= float((error[np.ix_(mask, mask)] ** 2).sum())
+    return total
+
+
+@pytest.mark.parametrize("target", ["full", "intermolecular"])
+def test_optimising_the_loss_reduces_the_error_it_targets(target):
+    """The end-to-end claim: descending this loss moves the real Hessian error down.
+
+    The reference is the analytic Hessian of the SAME model at slightly perturbed
+    weights, so the target is reachable and the minimum is near zero -- an achievable
+    target is what makes "the error went down" a meaningful assertion rather than a
+    statement about how expressive the model is. The error is then measured exactly,
+    from the analytic Hessian, not from the estimator that is being optimised.
+    """
+    atoms = _water_dimer()
+    model, _ = _local_split_charges_model(atoms)
+    atom_count = len(atoms)
+    assignment = _molecule_assignment(atoms)
+
+    original_state = {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+    }
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(0.02 * torch.randn_like(parameter))
+    reference = _analytic_hessian(
+        model, _batch(atoms, np.zeros((3 * atom_count, 3 * atom_count))), atom_count
+    )
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            parameter.copy_(original_state[name])
+
+    batch = _batch(atoms, reference)
+    exact_before = _exact_intermolecular_error(
+        _analytic_hessian(model, batch, atom_count), reference, assignment
+    )
+
+    loss_term = HessianProjectionLoss(target=target, probe_count=2)
+    optimizer = torch.optim.Adam(model.parameters(), lr=2e-3)
+    torch.manual_seed(41)
+    for _ in range(25):
+        optimizer.zero_grad(set_to_none=True)
+        loss_term(ref=batch, pred=_forward(model, batch)).backward()
+        optimizer.step()
+
+    exact_after = _exact_intermolecular_error(
+        _analytic_hessian(model, batch, atom_count), reference, assignment
+    )
+    assert exact_after < 0.5 * exact_before, (
+        f"{target}: exact intermolecular squared error went from {exact_before:.4g} "
+        f"to {exact_after:.4g}"
+    )
+
+
 def test_single_backward_product_matches_the_models_own_hessian():
     """One vector-Jacobian product per batch, versus the 3N-backward analytic Hessian."""
     atoms = _water_dimer()
