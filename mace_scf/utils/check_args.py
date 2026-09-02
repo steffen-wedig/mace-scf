@@ -148,6 +148,16 @@ def check_hessian_projection_requirements(args: argparse.Namespace):
             "the hessian_projection loss differentiates the forces; "
             "--compute_forces must be on"
         )
+    if args.valid_file is None:
+        # The sidecar is aligned frame by frame with its xyz file, but a
+        # --valid_fraction split happens inside the loader, before the dataset is
+        # handed back -- so the training set would no longer be the file the sidecar
+        # was written for. An explicit validation file keeps both splits aligned.
+        raise ValueError(
+            "reference Hessians require an explicit --valid_file: a --valid_fraction "
+            "split of the training file would break the frame-by-frame alignment of "
+            "the sidecar"
+        )
     if args.valid_hessian_reference_file is None:
         logging.warning(
             "training with a hessian_projection loss but without "

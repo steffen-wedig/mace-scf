@@ -155,7 +155,10 @@ def attach_reference_hessians(
     if len(entries) != len(dataset):
         raise ValueError(
             f"reference Hessian sidecar {path} holds {len(entries)} structures but the "
-            f"{split_name} has {len(dataset)} configurations"
+            f"{split_name} has {len(dataset)} configurations. The sidecar is aligned "
+            "frame by frame with one xyz file: pass the sidecar that belongs to this "
+            "split, and use an explicit --valid_file rather than --valid_fraction, "
+            "whose split happens inside the loader"
         )
 
     atomic_numbers_of_index = np.asarray(z_table.zs, dtype=int)
