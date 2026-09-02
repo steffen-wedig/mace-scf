@@ -26,6 +26,25 @@ LINEARIZE_POST_SOLVE_CHARGE_WARNING_THRESHOLD = 1e-6
 LINEARIZE_POST_SOLVE_CHARGE_FALLBACK_THRESHOLD = 1e-4
 
 
+def with_differentiated_positions(
+    output: Dict[str, Optional[torch.Tensor]],
+    batch_dict: Dict[str, torch.Tensor],
+) -> Dict[str, Optional[torch.Tensor]]:
+    """Expose the positions tensor the forward actually differentiated.
+
+    A loss that needs a second derivative -- the Hessian-projection losses in
+    :mod:`mace_scf.hessian_projections` -- must take its vector-Jacobian product with
+    respect to the same tensor object the forces were built from. That is NOT always
+    ``batch.positions``: with stress, virials or displacements enabled the forward
+    rebinds ``data["positions"]`` in place to the post-displacement, non-leaf tensor,
+    while the ``Batch`` attribute the loss sees still points at the original leaf.
+    Differentiating the wrong one silently yields an unused-input error rather than a
+    wrong number, but only exposing the right tensor makes the loss correct in general.
+    """
+    output["positions"] = batch_dict["positions"]
+    return output
+
+
 def make_model_wrapper(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -454,13 +473,14 @@ class DefaultModelWrapper:
             else nullcontext()
         )
         with param_context:
-            return model(
+            output = model(
                 batch_dict,
                 training=training,
                 compute_force=self.output_args["forces"],
                 compute_virials=self.output_args["virials"],
                 compute_stress=self.output_args["stress"],
             )
+        return with_differentiated_positions(output, batch_dict)
 
 
 class LocalSourcesModelWrapper:
@@ -487,13 +507,16 @@ class LocalSourcesModelWrapper:
             else nullcontext()
         )
         with param_context:
-            return model(
+            output = model(
                 batch_dict,
                 training=training,
                 compute_force=self.output_args["forces"],
                 compute_virials=self.output_args["virials"],
                 compute_stress=self.output_args["stress"],
             )
+        return with_differentiated_positions(output, batch_dict)
+
+
 class QEqModelWrapper:
     """Training wrapper for MaceQEq models."""
 

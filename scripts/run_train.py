@@ -27,6 +27,7 @@ import mace_scf.utils
 
 from mace_scf import electrostatics
 from mace_scf.utils.check_args import check_config_conflicts
+import mace_scf.hessian_projections
 import mace_scf.utils.run_train_utils
 from mace.tools.slurm_distributed import DistributedEnvironment
 
@@ -148,7 +149,25 @@ def main() -> None:
     # Data preparation
     train_set, valid_set, z_table, atomic_energies, test_collections = load_train_valid_sets_from_xyz(args, args.config_type_weights)
     logging.info(f"Atomic energies: {atomic_energies.tolist()}")
-    
+
+    # Reference Hessians for the projection losses. They ride on the configurations
+    # rather than in the xyz file (a (3N, 3N) matrix is neither an info scalar nor a
+    # per-atom array), and are verified frame by frame against the geometry they land on.
+    if args.hessian_reference_file is not None:
+        mace_scf.hessian_projections.attach_reference_hessians(
+            train_set,
+            args.hessian_reference_file,
+            z_table=z_table,
+            split_name="training set",
+        )
+    if args.valid_hessian_reference_file is not None:
+        mace_scf.hessian_projections.attach_reference_hessians(
+            valid_set,
+            args.valid_hessian_reference_file,
+            z_table=z_table,
+            split_name="validation set",
+        )
+
     train_sampler, valid_sampler = None, None
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -316,6 +335,16 @@ def main() -> None:
     else:
         distributed_model = None
 
+    # The Hessian-projection validation metric, whenever validation reference Hessians
+    # are available -- also for runs that do NOT train on a Hessian term, so the
+    # baseline curve is measured with the identical estimator and probe seed.
+    extra_validation = None
+    if args.valid_hessian_reference_file is not None:
+        extra_validation = mace_scf.hessian_projections.build_hessian_projection_evaluation(
+            probe_count=args.hessian_eval_probe_count,
+            seed=args.hessian_eval_seed,
+        )
+
     # for xyzs, option to log performance on test sets during training
     test_data_loaders = None
     if args.log_on_test_sets:
@@ -417,6 +446,7 @@ def main() -> None:
             debug_log_grad_summary=args.debug_log_grad_summary,
             debug_grad_log_frequency=args.wandb_watch_log_freq,
             wandb_watch=args.wandb_watch,
+            extra_validation=extra_validation,
         )
 
     # Evaluation on test datasets

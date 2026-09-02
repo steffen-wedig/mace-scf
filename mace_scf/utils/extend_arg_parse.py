@@ -253,6 +253,41 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         help="Log scalar parameter and gradient summaries during optimization.",
     )
     parser.add_argument(
+        "--hessian_reference_file",
+        type=str,
+        default=None,
+        help=(
+            "Sidecar of reference Hessians for the training set, aligned frame by frame "
+            "with --train_file (format: mace_scf.hessian_projections). Required by the "
+            "hessian_projection loss term."
+        ),
+    )
+    parser.add_argument(
+        "--valid_hessian_reference_file",
+        type=str,
+        default=None,
+        help="The same sidecar for the validation set, aligned with --valid_file.",
+    )
+    parser.add_argument(
+        "--hessian_eval_probe_count",
+        type=int,
+        default=16,
+        help=(
+            "Probes per structure and target in the validation Hessian-projection "
+            "metric. Averaging several fixed-seed probes keeps the estimator noise "
+            "below the model differences being measured."
+        ),
+    )
+    parser.add_argument(
+        "--hessian_eval_seed",
+        type=int,
+        default=2026,
+        help=(
+            "Seed of the validation Hessian probes. Held fixed across epochs, seeds "
+            "and runs so the metric stays comparable; unrelated to --seed."
+        ),
+    )
+    parser.add_argument(
         "--fixedpoint-initial-charge-head-scale",
         type=float,
         default=0.01,

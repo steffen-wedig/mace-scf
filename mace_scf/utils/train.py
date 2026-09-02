@@ -1,7 +1,7 @@
 import dataclasses
 import logging
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -115,7 +115,19 @@ def train(
     debug_log_grad_summary: bool = False,
     debug_grad_log_frequency: Optional[int] = None,
     wandb_watch: str = "off",
+    extra_validation: Optional[Callable] = None,
 ):
+    """Train one stage.
+
+    ``extra_validation`` is an optional hook run on the validation loader at every
+    evaluation interval, called as
+    ``extra_validation(model=, model_eval_wrapper=, data_loader=, device=, ema=)`` and
+    returning a dictionary of scalars that is merged into the logged evaluation metrics.
+    It exists for quantities the generic ``evaluate`` cannot produce because it detaches
+    the model outputs before the loss -- above all the Hessian-projection metrics of
+    :func:`mace_scf.hessian_projections.evaluate_hessian_projections`, which need the
+    force graph for a second derivative.
+    """
     lowest_loss = np.inf
     valid_loss = np.inf
     patience_counter = 0
@@ -188,6 +200,16 @@ def train(
                 data_loader=valid_loader,
                 device=device,
             )
+            if extra_validation is not None:
+                eval_metrics.update(
+                    extra_validation(
+                        model=model,
+                        model_eval_wrapper=model_eval_wrapper,
+                        data_loader=valid_loader,
+                        device=device,
+                        ema=ema,
+                    )
+                )
             eval_metrics["mode"] = "eval"
             eval_metrics["epoch"] = epoch
             logger.log(eval_metrics)
@@ -799,3 +821,15 @@ def valid_err_log(
         logging.info(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu} meA, RMSE_ESP={error_esp:.1f} mV"
         )
+
+    # Hessian-projection metrics are logged by the extra_validation hook, i.e. only
+    # when it is installed, and independently of the error-table type above.
+    if "rmse_hessian_full" in eval_metrics:
+        parts = []
+        for target in ("full", "intermolecular"):
+            error_hessian = eval_metrics[f"rmse_hessian_{target}"] * 1e3
+            relative = 100.0 * eval_metrics.get(f"rel_hessian_{target}", float("nan"))
+            parts.append(
+                f"{target} {error_hessian:.2f} meV / A^2 ({relative:.2f} %)"
+            )
+        logging.info(f"Epoch {epoch}: RMSE_Hessian_per_element: " + ", ".join(parts))

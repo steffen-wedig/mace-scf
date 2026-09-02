@@ -21,6 +21,7 @@ def check_config_conflicts(args: argparse.Namespace):
     compute_and_fill_irreps(args)
     check_train_test_files(args)
     check_unsupported_training_options(args)
+    check_hessian_projection_requirements(args)
     fill_fixedpoint_update_config(args)
     fill_field_readout_config(args)
 
@@ -114,6 +115,44 @@ def fill_default_train_settings(train_stage_dict):
         loss_dict[key] = val
     train_stage_dict["loss"] = loss_dict
 
+
+
+def check_hessian_projection_requirements(args: argparse.Namespace):
+    """A Hessian-projection loss term needs its reference Hessians, and a graph.
+
+    Both failures are cheap to detect here and expensive to discover an hour into a
+    run: the sidecar path is simply missing, or the model family has no second
+    derivative at all (the fixed-point models -- differentiating through the
+    self-consistency loop needs implicit differentiation, not a naive double backward).
+    """
+    stages_with_hessian_loss = [
+        train_stage["name"]
+        for train_stage in args.train_schedule
+        if "hessian_projection" in train_stage["loss"]
+    ]
+    if not stages_with_hessian_loss:
+        return
+    if args.hessian_reference_file is None:
+        raise ValueError(
+            "the hessian_projection loss is requested by train stage(s) "
+            f"{stages_with_hessian_loss} but --hessian_reference_file is not set"
+        )
+    if args.model in ("FixedPoint", "FixedPointCore"):
+        raise ValueError(
+            f"the hessian_projection loss is not available for model={args.model}: a "
+            "second derivative through the self-consistency loop needs implicit "
+            "differentiation"
+        )
+    if not args.compute_forces:
+        raise ValueError(
+            "the hessian_projection loss differentiates the forces; "
+            "--compute_forces must be on"
+        )
+    if args.valid_hessian_reference_file is None:
+        logging.warning(
+            "training with a hessian_projection loss but without "
+            "--valid_hessian_reference_file: no validation Hessian metric will be logged"
+        )
 
 
 def fill_default_dirs(args: argparse.Namespace):

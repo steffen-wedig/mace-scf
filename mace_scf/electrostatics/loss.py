@@ -11,6 +11,7 @@ from mace.modules.loss import (
     weighted_mean_squared_stress,
 )
 from .utils import compute_effective_index
+from mace_scf.hessian_projections import HessianProjectionLoss
 import logging
 
 
@@ -262,6 +263,7 @@ _LOSS_FUNCTIONS = {
     "fermi_level_gradient": fermi_level_gradient_function,
     "final_terms_fixedpoint_scf_stability": final_terms_fixedpoint_scf_stability,
     "field_features": weighted_mean_squared_error_field_feats,
+    "hessian_projection": HessianProjectionLoss,
 }
 
 
