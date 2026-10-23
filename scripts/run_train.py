@@ -127,7 +127,24 @@ def main() -> None:
 
     # choices to simply this repo:
     compute_energy = True
-    assert args.compute_forces
+    if not args.compute_forces:
+        # Energy-only training skips the force pass, so nothing may read forces.
+        force_terms = {"forces", "molecular_forces"}
+        stages_with_forces = [
+            stage["name"]
+            for stage in args.train_schedule
+            if force_terms & set(stage["loss"])
+        ]
+        if stages_with_forces:
+            raise ValueError(
+                f"compute_forces is False but stages {stages_with_forces} have a "
+                "force loss term"
+            )
+        if args.error_table != "PerAtomEnergyRMSE":
+            raise ValueError(
+                "compute_forces is False: use error_table PerAtomEnergyRMSE, "
+                f"not {args.error_table}"
+            )
     output_args = {
         "energy": compute_energy,
         "forces": args.compute_forces,

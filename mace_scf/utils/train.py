@@ -221,8 +221,8 @@ def train(
                         "epoch": epoch,
                         "valid_loss": valid_loss,
                         "valid_rmse_e_per_atom": eval_metrics["rmse_e_per_atom"],
-                        "valid_rmse_f": eval_metrics["rmse_f"],
-                        "valid_mae_f": eval_metrics["mae_f"],
+                        "valid_rmse_f": eval_metrics.get("rmse_f"),
+                        "valid_mae_f": eval_metrics.get("mae_f"),
                     }
                     if "rmse_dma" in eval_metrics:
                         wandb_log_dict["valid_rmse_dma"] = eval_metrics["rmse_dma"]
@@ -695,6 +695,11 @@ def valid_err_log(
         error_f = eval_metrics["rmse_f"] * 1e3
         logging.info(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
+        )
+    elif log_errors == "PerAtomEnergyRMSE":
+        error_e = eval_metrics["rmse_e_per_atom"] * 1e3
+        logging.info(
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV"
         )
     elif (
         log_errors == "PerAtomRMSEstressvirials"
