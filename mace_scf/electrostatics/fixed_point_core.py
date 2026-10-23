@@ -644,7 +644,9 @@ class FixedPointCore(torch.nn.Module):
         displacement = torch.zeros(
             (num_graphs, 3, 3), dtype=positions.dtype, device=positions.device
         )
-        forces, _, _, _, _ = get_outputs(
+        # Only the forces are used; mace's get_outputs grew from five return
+        # values to six (0.3.17), so index rather than unpack.
+        forces = get_outputs(
             energy=total_energy,
             positions=positions,
             displacement=displacement,
@@ -653,7 +655,7 @@ class FixedPointCore(torch.nn.Module):
             compute_force=compute_force,
             compute_virials=compute_virials,
             compute_stress=compute_stress,
-        )
+        )[0]
 
         return {
             "energy": total_energy,
