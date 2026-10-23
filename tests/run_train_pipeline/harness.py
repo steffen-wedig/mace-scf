@@ -502,8 +502,9 @@ def summarize_run_train_result(result: RunTrainResult):
     valid_count = _search_int(
         r"Total number of configurations: train=\d+, valid=(\d+)", log_text
     )
-    z_table_text = _search_one(r"AtomicNumberTable: \((.*?)\)", log_text, "")
-    z_table = [int(item.strip()) for item in z_table_text.split(",") if item.strip()]
+    z_table_text = _search_one(r"AtomicNumberTable: \(([^\n]*)\)", log_text, "")
+    # numpy 2 prints the table entries as np.int64(1), numpy 1 as 1.
+    z_table = [int(number) for number in re.findall(r"(?:np\.int64\()?(\d+)", z_table_text)]
 
     return {
         "case": {
