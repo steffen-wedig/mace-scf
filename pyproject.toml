@@ -8,7 +8,6 @@ dynamic = ["version"]
 
 [project.scripts]
 mace-scf-train = "mace_scf.cli.run_train:main"
-mace-scf-predict = "mace_scf.cli.predict:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "mace_scf.__version__.__version__"}
