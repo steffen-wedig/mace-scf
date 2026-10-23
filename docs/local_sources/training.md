@@ -1,7 +1,7 @@
 # Training Local-Source Models
 
 The three local-source models are trained through the same entry point,
-`scripts/run_train.py`, and use the same basic data/config structure. The main
+`mace-scf-train` (`mace_scf/cli/run_train.py`), and use the same basic data/config structure. The main
 differences are the model selected with `--model`, whether formal charges are
 needed, and which loss terms are physically meaningful.
 
@@ -50,7 +50,7 @@ train_schedule:
 Note that you can mix and match loss functions between training stages. A matching training command is:
 
 ```bash
-python scripts/run_train.py \
+mace-scf-train \
     --name nonpol_example \
     --config config.yaml \
     --train_file train.xyz \

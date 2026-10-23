@@ -1,6 +1,6 @@
 # Training Fixed-Point SCF Models
 
-The main training entry point is `scripts/run_train.py`. Datasets, losses, and
+The main training entry point is `mace-scf-train` (`mace_scf/cli/run_train.py`). Datasets, losses, and
 training stages are specified in `config.yaml`; see
 [data and config files](../concepts/data_and_config_files.md).
 
@@ -18,7 +18,7 @@ definitions.
 ## Architecture Hyperparameters
 
 Architecture hyperparameters are command-line arguments to
-`scripts/run_train.py`. They define the model and should usually be fixed
+`mace-scf-train` (`mace_scf/cli/run_train.py`). They define the model and should usually be fixed
 across all stages of a training schedule.
 
 ### Density Representation

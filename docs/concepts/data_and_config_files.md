@@ -12,7 +12,7 @@ An example training script and `config.yaml` for the Local Symmetric Charge MACE
 
 `train.sh`:
 ```bash
-python scripts/run_train.py \
+mace-scf-train \
     --name="split_charge_example" \
     --config=config.yaml \
     --train_file=$train \

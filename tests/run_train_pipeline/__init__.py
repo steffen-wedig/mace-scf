@@ -1,1 +1,1 @@
-"""Helpers and tests for exercising scripts/run_train.py."""
+"""Helpers and tests for exercising the trainer (mace_scf.cli.run_train)."""

@@ -14,7 +14,7 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RUN_TRAIN_SCRIPT = REPO_ROOT / "scripts" / "run_train.py"
+RUN_TRAIN_SCRIPT = REPO_ROOT / "mace_scf" / "cli" / "run_train.py"
 DEFAULT_REFERENCE_DATA = (
     REPO_ROOT / "tests" / "run_train_pipeline" / "reference" / "water_clusters.xyz"
 )
