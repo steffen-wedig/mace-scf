@@ -241,10 +241,9 @@ def main() -> None:
     logging.info("Building model")
     logging.info(f"Hidden irreps: {args.hidden_irreps}")
     if args.compile_training:
-        # mace.tools.compile.prepare's recipe: no e3nn TorchScript codegen, and the
-        # registered e3nn modules replaced by traceable fx graphs.
-        from mace.tools.compile import simplify
-
+        # No e3nn TorchScript codegen, which torch.compile cannot trace; the
+        # traceable fx graphs live only in CompiledTrainingWrapper's view, so the
+        # model keeps its own module types for saving and inspection.
         mace_scf.utils.model_training_wrappers.configure_training_compilation()
         with mace_scf.utils.run_train_utils.disable_e3nn_codegen():
             model = mace_scf.utils.run_train_utils.build_model(
@@ -253,8 +252,7 @@ def main() -> None:
                 atomic_energies=atomic_energies,
                 atomic_charges=atomic_charges,
                 train_loader=train_loader,
-            )
-        model = simplify(model).to(device)
+            ).to(device)
     else:
         model = mace_scf.utils.run_train_utils.build_model(
             args=args,

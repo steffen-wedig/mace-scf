@@ -301,16 +301,6 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
     )
     parser.add_argument(
-        "--compile_training",
-        help=(
-            "Run training forwards through torch.compile (one graph, dynamic shapes); "
-            "validation stays eager. Local-source models and MACE only; for real-space "
-            "electrostatics use --electrostatic_realspace_method analytical"
-        ),
-        default=False,
-        action=argparse.BooleanOptionalAction,
-    )
-    parser.add_argument(
         "--model",
         choices=[
             "ScaleShiftMACE",

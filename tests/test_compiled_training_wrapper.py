@@ -18,7 +18,6 @@ import mace.data
 import mace.modules
 import mace.tools
 from mace.tools import torch_geometric, torch_tools
-from mace.tools.compile import simplify
 
 import mace_scf.data
 from mace_scf.electrostatics import LocalSplitCharges
@@ -64,7 +63,7 @@ def build_model(z_table) -> LocalSplitCharges:
             pbc_handling="realspace",
             realspace_method="analytical",
         )
-    return simplify(model)
+    return model
 
 
 def water_cluster(molecules: int, seed: int):
@@ -120,6 +119,10 @@ def test_compiled_training_forward_matches_eager(sizes):
     )
 
     torch.testing.assert_close(compiled_loss, eager_loss, rtol=1e-12, atol=1e-12)
+    # The traced graphs live in the compiled view only; the model is what is
+    # saved, with its own module types.
+    assert not isinstance(model.products[0].symmetric_contractions, torch.fx.GraphModule)
+    assert not isinstance(model.readouts[-1], torch.fx.GraphModule)
     for compiled_gradient, eager_gradient in zip(compiled_gradients, eager_gradients):
         if eager_gradient is None:
             assert compiled_gradient is None

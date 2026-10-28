@@ -544,11 +544,14 @@ def configure_training_compilation() -> None:
 class CompiledTrainingWrapper:
     """Runs the training forwards of a model wrapper through torch.compile.
 
-    Evaluation (``training=False``) stays eager. The model must be built for
-    compilation (e3nn codegen off, ``mace.tools.compile.simplify``). A compiled
-    graph can neither toggle ``requires_grad`` on parameters nor turn its inputs
-    into differentiable leaves, so both happen here, before the compiled call:
-    an eager evaluation forward switches the parameters' gradients off.
+    Evaluation (``training=False``) stays eager. The model must be built without
+    e3nn codegen; the compiled forward runs on
+    ``mace.tools.compile.simplified_view(model)``, which shares the model's
+    parameters, so the model itself keeps its module types for saving. A
+    compiled graph can neither toggle ``requires_grad`` on parameters nor turn
+    its inputs into differentiable leaves, so both happen here, before the
+    compiled call: an eager evaluation forward switches the parameters'
+    gradients off.
     """
 
     def __init__(self, wrapper, backend: str = "inductor"):
@@ -560,12 +563,22 @@ class CompiledTrainingWrapper:
         self.wrapper = wrapper
         self.optimizer = wrapper.optimizer
         self.output_args = wrapper.output_args
-        self.compiled_forward = torch.compile(
-            self._training_forward, fullgraph=True, dynamic=True, backend=backend
-        )
+        self.backend = backend
+        self.compiled_forward = None
+        self.compiled_model = None
 
-    def _training_forward(self, model, batch_dict):
-        return self.wrapper(model, batch_dict, training=True)
+    def _compile_for(self, model):
+        from mace.tools.compile import simplified_view
+
+        view = simplified_view(model)
+
+        def training_forward(batch_dict):
+            return self.wrapper(view, batch_dict, training=True)
+
+        self.compiled_model = model
+        self.compiled_forward = torch.compile(
+            training_forward, fullgraph=True, dynamic=True, backend=self.backend
+        )
 
     def __call__(
         self,
@@ -580,4 +593,6 @@ class CompiledTrainingWrapper:
             parameter.requires_grad_(True)
         batch_dict["node_attrs"].requires_grad_(True)
         batch_dict["positions"].requires_grad_(True)
-        return self.compiled_forward(model, batch_dict)
+        if self.compiled_model is not model:
+            self._compile_for(model)
+        return self.compiled_forward(batch_dict)
