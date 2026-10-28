@@ -240,13 +240,29 @@ def main() -> None:
     # Build model
     logging.info("Building model")
     logging.info(f"Hidden irreps: {args.hidden_irreps}")
-    model = mace_scf.utils.run_train_utils.build_model(
-        args=args,
-        z_table=z_table,
-        atomic_energies=atomic_energies,
-        atomic_charges=atomic_charges,
-        train_loader=train_loader,
-    ).to(device)
+    if args.compile_training:
+        # mace.tools.compile.prepare's recipe: no e3nn TorchScript codegen, and the
+        # registered e3nn modules replaced by traceable fx graphs.
+        from mace.tools.compile import simplify
+
+        mace_scf.utils.model_training_wrappers.configure_training_compilation()
+        with mace_scf.utils.run_train_utils.disable_e3nn_codegen():
+            model = mace_scf.utils.run_train_utils.build_model(
+                args=args,
+                z_table=z_table,
+                atomic_energies=atomic_energies,
+                atomic_charges=atomic_charges,
+                train_loader=train_loader,
+            )
+        model = simplify(model).to(device)
+    else:
+        model = mace_scf.utils.run_train_utils.build_model(
+            args=args,
+            z_table=z_table,
+            atomic_energies=atomic_energies,
+            atomic_charges=atomic_charges,
+            train_loader=train_loader,
+        ).to(device)
 
     # Optimizer
     param_options = mace_scf.utils.run_train_utils.get_param_options(model, args)
@@ -382,6 +398,10 @@ def main() -> None:
             output_args=output_args,
             fixed_point_training_options=train_stage.get("fixed_point_training_options"),
         )
+        if args.compile_training:
+            eval_wrapper = mace_scf.utils.model_training_wrappers.CompiledTrainingWrapper(
+                eval_wrapper
+            )
         logging.info(f"Setting global learning rate to {train_stage['lr']}")
         for param_group in optimizer.param_groups:
             param_group["lr"] = train_stage["lr"]

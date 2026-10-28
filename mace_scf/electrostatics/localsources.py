@@ -190,6 +190,7 @@ class _LocalSourceModelBase(torch.nn.Module):
         atomic_multipoles_smearing_width: float,
         include_electrostatic_self_interaction: bool = False,
         pbc_handling: str = "mixed_periodic",
+        realspace_method: str = "finite_difference",
     ) -> None:
         kspace_cutoff = kspace_cutoff_factor * gto_basis_kspace_cutoff(
             [atomic_multipoles_smearing_width], atomic_multipoles_max_l
@@ -204,6 +205,7 @@ class _LocalSourceModelBase(torch.nn.Module):
             kspace_cutoff=kspace_cutoff,
             include_self_interaction=include_electrostatic_self_interaction,
             pbc_handling=pbc_handling,
+            realspace_method=realspace_method,
         )
 
     def _compute_coulomb_and_field_energy(
@@ -292,6 +294,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
         atomic_multipoles_smearing_width: float = 1.0,
         include_electrostatic_self_interaction: bool = False,
         pbc_handling: str = "mixed_periodic",
+        realspace_method: str = "finite_difference",
         static_bond_transfer_block: str = "NoFieldSymmetricPredictionSourceBlock",
         oxidation_state_mixer: str = "NoOxidationStateMixer",
         oxidation_state_range: Optional[Tuple] = (-4., 4.),
@@ -335,6 +338,9 @@ class LocalSplitCharges(_LocalSourceModelBase):
             self.formal_charges = PerSpeciesFormalChargesBlock(atomic_formal_charges)
 
         self.charges_irreps = o3.Irreps.spherical_harmonics(atomic_multipoles_max_l)
+        # An int for forward: Irreps.dim iterates e3nn Irrep objects, which
+        # torch.compile cannot guard.
+        self.charges_dimension = self.charges_irreps.dim
         static_bond_transfer_block_cls = static_bond_transfer_blocks[static_bond_transfer_block]
         self.lr_source_maps = torch.nn.ModuleList(
             [
@@ -372,6 +378,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
             atomic_multipoles_smearing_width=atomic_multipoles_smearing_width,
             include_electrostatic_self_interaction=include_electrostatic_self_interaction,
             pbc_handling=pbc_handling,
+            realspace_method=realspace_method,
         )
 
     def forward(
@@ -392,15 +399,19 @@ class LocalSplitCharges(_LocalSourceModelBase):
         )
 
         # Setup
-        if not training:
-            for p in self.parameters():
-                p.requires_grad = False
-        else:
-            for p in self.parameters():
-                p.requires_grad = True
+        # A compiled graph can neither toggle requires_grad on parameters nor
+        # turn its inputs into differentiable leaves: a compiled training step
+        # sets both before calling the model (as MACE's prepare_graph does).
+        if not torch.compiler.is_compiling():
+            if not training:
+                for p in self.parameters():
+                    p.requires_grad = False
+            else:
+                for p in self.parameters():
+                    p.requires_grad = True
 
-        data["node_attrs"].requires_grad_(True)
-        data["positions"].requires_grad_(True)
+            data["node_attrs"].requires_grad_(True)
+            data["positions"].requires_grad_(True)
         num_graphs = data["ptr"].numel() - 1
         displacement = torch.zeros(
             (num_graphs, 3, 3),
@@ -451,7 +462,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
 
         # density
         charge_density = torch.zeros(
-            (data["batch"].size(-1), self.charges_irreps.dim),
+            (data["batch"].size(-1), self.charges_dimension),
             device=data["batch"].device,
             dtype=torch.get_default_dtype(),
         )
@@ -628,6 +639,7 @@ class LocalCharges(_LocalSourceModelBase):
         atomic_multipoles_smearing_width: float = 1.0,
         include_electrostatic_self_interaction: bool = False,
         pbc_handling: str = "mixed_periodic",
+        realspace_method: str = "finite_difference",
         heads: Optional[List[str]] = None,
     ):
         super().__init__()
@@ -653,6 +665,9 @@ class LocalCharges(_LocalSourceModelBase):
         )
 
         self.charges_irreps = o3.Irreps.spherical_harmonics(atomic_multipoles_max_l)
+        # An int for forward: Irreps.dim iterates e3nn Irrep objects, which
+        # torch.compile cannot guard.
+        self.charges_dimension = self.charges_irreps.dim
         self.lr_source_maps = torch.nn.ModuleList(
             [
                 EnvironmentDependentSourceBlock(
@@ -668,6 +683,7 @@ class LocalCharges(_LocalSourceModelBase):
             atomic_multipoles_smearing_width=atomic_multipoles_smearing_width,
             include_electrostatic_self_interaction=include_electrostatic_self_interaction,
             pbc_handling=pbc_handling,
+            realspace_method=realspace_method,
         )
 
     def forward(
@@ -688,15 +704,19 @@ class LocalCharges(_LocalSourceModelBase):
         )
 
         # Setup
-        if not training:
-            for p in self.parameters():
-                p.requires_grad = False
-        else:
-            for p in self.parameters():
-                p.requires_grad = True
+        # A compiled graph can neither toggle requires_grad on parameters nor
+        # turn its inputs into differentiable leaves: a compiled training step
+        # sets both before calling the model (as MACE's prepare_graph does).
+        if not torch.compiler.is_compiling():
+            if not training:
+                for p in self.parameters():
+                    p.requires_grad = False
+            else:
+                for p in self.parameters():
+                    p.requires_grad = True
 
-        data["node_attrs"].requires_grad_(True)
-        data["positions"].requires_grad_(True)
+            data["node_attrs"].requires_grad_(True)
+            data["positions"].requires_grad_(True)
         num_graphs = data["ptr"].numel() - 1
         displacement = torch.zeros(
             (num_graphs, 3, 3),
@@ -748,7 +768,7 @@ class LocalCharges(_LocalSourceModelBase):
 
         # density
         charge_density = torch.zeros(
-            (data["batch"].size(-1), self.charges_irreps.dim),
+            (data["batch"].size(-1), self.charges_dimension),
             device=data["batch"].device,
             dtype=torch.get_default_dtype(),
         )
@@ -871,6 +891,7 @@ class FixedChargeBaselinedMACE(_LocalSourceModelBase):
         atomic_multipoles_smearing_width: float = 1.0,
         include_electrostatic_self_interaction: bool = False,
         pbc_handling: str = "mixed_periodic",
+        realspace_method: str = "finite_difference",
         heads: Optional[List[str]] = None,
         use_linear_final_readout: bool = False,
     ):
@@ -909,6 +930,7 @@ class FixedChargeBaselinedMACE(_LocalSourceModelBase):
             atomic_multipoles_smearing_width=atomic_multipoles_smearing_width,
             include_electrostatic_self_interaction=include_electrostatic_self_interaction,
             pbc_handling=pbc_handling,
+            realspace_method=realspace_method,
         )
 
     def forward(
@@ -928,15 +950,19 @@ class FixedChargeBaselinedMACE(_LocalSourceModelBase):
             else torch.zeros_like(data["batch"])
         )
 
-        if not training:
-            for p in self.parameters():
-                p.requires_grad = False
-        else:
-            for p in self.parameters():
-                p.requires_grad = True
+        # A compiled graph can neither toggle requires_grad on parameters nor
+        # turn its inputs into differentiable leaves: a compiled training step
+        # sets both before calling the model (as MACE's prepare_graph does).
+        if not torch.compiler.is_compiling():
+            if not training:
+                for p in self.parameters():
+                    p.requires_grad = False
+            else:
+                for p in self.parameters():
+                    p.requires_grad = True
 
-        data["node_attrs"].requires_grad_(True)
-        data["positions"].requires_grad_(True)
+            data["node_attrs"].requires_grad_(True)
+            data["positions"].requires_grad_(True)
         num_graphs = data["ptr"].numel() - 1
         displacement = torch.zeros(
             (num_graphs, 3, 3),

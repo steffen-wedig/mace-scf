@@ -122,6 +122,7 @@ def build_model(
             include_electrostatic_self_interaction=args.include_electrostatic_self_interaction,
             use_linear_final_readout=args.use_linear_final_readout,
             pbc_handling=args.electrostatic_pbc_method,
+            realspace_method=args.electrostatic_realspace_method,
         )
     elif args.model == "LocalSplitCharges":
         formal_charges = ast.literal_eval(args.atomic_formal_charges)
@@ -143,6 +144,7 @@ def build_model(
             compute_polarizability=args.compute_polarizability,
             use_linear_final_readout=args.use_linear_final_readout,
             pbc_handling=args.electrostatic_pbc_method,
+            realspace_method=args.electrostatic_realspace_method,
         )
     elif args.model == "LocalCharges":
         model = electrostatics.LocalCharges(
@@ -155,6 +157,7 @@ def build_model(
             atomic_multipoles_smearing_width=args.atomic_multipoles_smearing_width,
             include_electrostatic_self_interaction=args.include_electrostatic_self_interaction,
             pbc_handling=args.electrostatic_pbc_method,
+            realspace_method=args.electrostatic_realspace_method,
         )
     elif args.model == "FixedPoint":
         with disable_e3nn_codegen():

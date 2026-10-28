@@ -124,6 +124,17 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         ],
     )
     parser.add_argument(
+        "--electrostatic_realspace_method",
+        help=(
+            "Non-periodic Coulomb evaluator of the local-source models: "
+            "finite_difference (displaced point charges for the dipoles) or "
+            "analytical (exact Gaussian multipoles; compiles into one graph)"
+        ),
+        type=str,
+        default="finite_difference",
+        choices=["finite_difference", "analytical"],
+    )
+    parser.add_argument(
         "--static_bond_transfer_block", 
         help="Block to use for static bond transfer",
         type=str, 
@@ -287,6 +298,16 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         "--restart_latest",
         help="restart optimizer from latest checkpoint",
         default=True,
+        action=argparse.BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--compile_training",
+        help=(
+            "Run training forwards through torch.compile (one graph, dynamic shapes); "
+            "validation stays eager. Local-source models and MACE only; for real-space "
+            "electrostatics use --electrostatic_realspace_method analytical"
+        ),
+        default=False,
         action=argparse.BooleanOptionalAction,
     )
     parser.add_argument(

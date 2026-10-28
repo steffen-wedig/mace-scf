@@ -525,3 +525,59 @@ class QEqModelWrapper:
                 compute_virials=self.output_args["virials"],
                 compute_stress=self.output_args["stress"],
             )
+
+
+def configure_training_compilation() -> None:
+    """Global torch settings a compiled training forward needs.
+
+    Force gradients are traced into the graph (MACE's compile recipe), and the
+    real-space pair list has a data-dependent edge count, which dynamo must
+    capture instead of breaking the graph.
+    """
+    from mace.tools.compile import configure_autograd_for_compile
+
+    configure_autograd_for_compile(allow_autograd=True)
+    torch._dynamo.config.capture_scalar_outputs = True
+    torch._dynamo.config.capture_dynamic_output_shape_ops = True
+
+
+class CompiledTrainingWrapper:
+    """Runs the training forwards of a model wrapper through torch.compile.
+
+    Evaluation (``training=False``) stays eager. The model must be built for
+    compilation (e3nn codegen off, ``mace.tools.compile.simplify``). A compiled
+    graph can neither toggle ``requires_grad`` on parameters nor turn its inputs
+    into differentiable leaves, so both happen here, before the compiled call:
+    an eager evaluation forward switches the parameters' gradients off.
+    """
+
+    def __init__(self, wrapper, backend: str = "inductor"):
+        if not isinstance(wrapper, (LocalSourcesModelWrapper, DefaultModelWrapper)):
+            raise ValueError(
+                f"compiled training supports local-source and MACE models, not "
+                f"{type(wrapper).__name__}"
+            )
+        self.wrapper = wrapper
+        self.optimizer = wrapper.optimizer
+        self.output_args = wrapper.output_args
+        self.compiled_forward = torch.compile(
+            self._training_forward, fullgraph=True, dynamic=True, backend=backend
+        )
+
+    def _training_forward(self, model, batch_dict):
+        return self.wrapper(model, batch_dict, training=True)
+
+    def __call__(
+        self,
+        model: torch.nn.Module,
+        batch_dict: Dict[str, torch.Tensor],
+        training: bool = False,
+        ema: Optional[ExponentialMovingAverage] = None,
+    ):
+        if not training:
+            return self.wrapper(model, batch_dict, training=False, ema=ema)
+        for parameter in model.parameters():
+            parameter.requires_grad_(True)
+        batch_dict["node_attrs"].requires_grad_(True)
+        batch_dict["positions"].requires_grad_(True)
+        return self.compiled_forward(model, batch_dict)
