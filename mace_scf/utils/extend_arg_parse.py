@@ -210,6 +210,20 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         action='store_true'
     )
     parser.add_argument(
+        "--atomic_inter_scale",
+        help="LocalSplitCharges: scale of the interaction energy, a float or a "
+        "list with one float per head (parsed with ast.literal_eval)",
+        type=str,
+        default="1.0",
+    )
+    parser.add_argument(
+        "--atomic_inter_shift",
+        help="LocalSplitCharges: per-atom shift of the interaction energy, a "
+        "float or a list with one float per head (parsed with ast.literal_eval)",
+        type=str,
+        default="0.0",
+    )
+    parser.add_argument(
         "--include_field_si",
         action='store_true',
         default=False

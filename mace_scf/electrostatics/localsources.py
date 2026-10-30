@@ -1,5 +1,6 @@
 """ implementation of local source models, in which no scf or minimization is needed """
 import torch
+from collections.abc import Sequence
 from typing import Callable, Dict, List, Optional, Type, Tuple
 from e3nn.util.jit import compile_mode
 from e3nn import o3
@@ -26,6 +27,7 @@ from mace.modules import (
     LinearReadoutBlock,
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
+    ScaleShiftBlock,
 )
 from .bonded_blocks import (
     PerSpeciesFormalChargesBlock,
@@ -301,6 +303,8 @@ class LocalSplitCharges(_LocalSourceModelBase):
         heads: Optional[List[str]] = None,
         compute_polarizability: bool = False,
         use_linear_final_readout: bool = False,
+        atomic_inter_scale: float | Sequence[float] = 1.0,
+        atomic_inter_shift: float | Sequence[float] = 0.0,
     ):
         super().__init__()
         self._init_local_model(
@@ -323,6 +327,31 @@ class LocalSplitCharges(_LocalSourceModelBase):
             radial_type=radial_type,
             heads=heads,
             use_linear_final_readout=use_linear_final_readout,
+        )
+
+        # Per-head scale and shift of the interaction energies, as in
+        # mace.modules.ScaleShiftMACE: E_inter = scale * sum_layers(e_layer)
+        # + shift per atom. forward scales every layer's node energies and adds
+        # the shift once, to the first interaction layer, so that the
+        # per-layer contributions still sum to the total. E0 and the Coulomb
+        # energy are not scaled.
+        # A single float applies to every head; a sequence gives one per head.
+        per_head_scale_shift = {}
+        for name, value in (
+            ("atomic_inter_scale", atomic_inter_scale),
+            ("atomic_inter_shift", atomic_inter_shift),
+        ):
+            if isinstance(value, (int, float)):
+                value = [float(value)] * len(self.heads)
+            if len(value) != len(self.heads):
+                raise ValueError(
+                    f"{name} has {len(value)} entries, but the model has "
+                    f"{len(self.heads)} heads {self.heads}"
+                )
+            per_head_scale_shift[name] = [float(item) for item in value]
+        self.scale_shift = ScaleShiftBlock(
+            scale=per_head_scale_shift["atomic_inter_scale"],
+            shift=per_head_scale_shift["atomic_inter_shift"],
         )
 
         # embedding of oxidation states
@@ -485,6 +514,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
         energies = [e0]
         node_energies_list = [node_e0]
         polarizabilities = []
+        node_inter_scale = torch.atleast_1d(self.scale_shift.scale)[node_heads]
         for layer_i, (interaction, product, readout, charge_map) in enumerate(zip(
             self.interactions, self.products, self.readouts, self.lr_source_maps
         )):
@@ -502,6 +532,10 @@ class LocalSplitCharges(_LocalSourceModelBase):
             )
             node_energies = readout(node_feats, node_heads)
             node_energies = torch.gather(node_energies, dim=1, index=node_heads.view(-1,1)).squeeze(-1)
+            if layer_i == 0:
+                node_energies = self.scale_shift(node_energies, node_heads)
+            else:
+                node_energies = node_inter_scale * node_energies
             energy = scatter_sum(
                 src=node_energies, index=data["batch"], dim=-1, dim_size=num_graphs
             )  # [n_graphs,]

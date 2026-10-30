@@ -56,6 +56,7 @@ class LocalSplitChargesCompiledCore(torch.nn.Module):
         self.interactions = model.interactions
         self.products = model.products
         self.readouts = model.readouts
+        self.scale_shift = model.scale_shift
         self.oxidation_state_mixer = model.oxidation_state_mixer
         self.formal_charges = model.formal_charges
         self.lr_source_maps = model.lr_source_maps
@@ -149,11 +150,16 @@ class LocalSplitChargesCompiledCore(torch.nn.Module):
         energies: list,
         node_energies_list: list,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        for interaction, product, readout, charge_map in zip(
-            self.interactions,
-            self.products,
-            self.readouts,
-            self.lr_source_maps,
+        # Same scale/shift placement as LocalSplitCharges.forward: every
+        # layer's node energies are scaled, the shift is added once (layer 0).
+        node_inter_scale = torch.atleast_1d(self.scale_shift.scale)[node_heads]
+        for layer_index, (interaction, product, readout, charge_map) in enumerate(
+            zip(
+                self.interactions,
+                self.products,
+                self.readouts,
+                self.lr_source_maps,
+            )
         ):
             node_feats, sc = _call_module(
                 interaction,
@@ -175,6 +181,10 @@ class LocalSplitChargesCompiledCore(torch.nn.Module):
                 dim=1,
                 index=node_heads.view(-1, 1),
             ).squeeze(-1)
+            if layer_index == 0:
+                node_energies = self.scale_shift(node_energies, node_heads)
+            else:
+                node_energies = node_inter_scale * node_energies
             energy = scatter_sum(
                 src=node_energies,
                 index=batch,

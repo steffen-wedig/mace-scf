@@ -45,6 +45,31 @@ def _rescale_fixedpoint_charge_heads(
 
 
 
+def parse_scale_shift_argument(value: str, option_name: str) -> float | list[float]:
+    """Parse a --atomic_inter_scale / --atomic_inter_shift string into a float
+    or a list of floats (one per head)."""
+    try:
+        parsed = ast.literal_eval(value)
+    except (ValueError, SyntaxError) as error:
+        raise ValueError(
+            f"{option_name} must be a float or a list of floats, got {value!r}"
+        ) from error
+    if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+        return float(parsed)
+    if (
+        isinstance(parsed, (list, tuple))
+        and len(parsed) > 0
+        and all(
+            isinstance(item, (int, float)) and not isinstance(item, bool)
+            for item in parsed
+        )
+    ):
+        return [float(item) for item in parsed]
+    raise ValueError(
+        f"{option_name} must be a float or a non-empty list of floats, got {value!r}"
+    )
+
+
 def build_model(
     args,
     z_table,
@@ -145,6 +170,12 @@ def build_model(
             use_linear_final_readout=args.use_linear_final_readout,
             pbc_handling=args.electrostatic_pbc_method,
             realspace_method=args.electrostatic_realspace_method,
+            atomic_inter_scale=parse_scale_shift_argument(
+                args.atomic_inter_scale, "--atomic_inter_scale"
+            ),
+            atomic_inter_shift=parse_scale_shift_argument(
+                args.atomic_inter_shift, "--atomic_inter_shift"
+            ),
         )
     elif args.model == "LocalCharges":
         model = electrostatics.LocalCharges(
